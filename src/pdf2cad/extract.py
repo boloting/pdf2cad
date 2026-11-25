@@ -121,10 +121,16 @@ def simplify(segs: list[Seg], closed: bool) -> list[Seg]:
 
 
 def extract_shapes(page: pymupdf.Page) -> tuple[list[Shape], bool]:
+    # Drawing coordinates are in the unrotated page space; rotate them to the
+    # page as it is displayed.
     h = page.rect.height
+    m = page.rotation_matrix
+
+    ma, mb, mc, md, me, mf = m.a, m.b, m.c, m.d, m.e, m.f
 
     def cv(p) -> Vec:
-        return (p.x * PT, (h - p.y) * PT)
+        x, y = p[0], p[1]
+        return ((x * ma + y * mc + me) * PT, (h - (x * mb + y * md + mf)) * PT)
 
     shapes: list[Shape] = []
     has_layers = False
@@ -195,13 +201,15 @@ _REPLACE = {"\u2300": "Ø", "\uf06e": "Ø"}
 def extract_texts(page: pymupdf.Page, height_factor: float = 0.7) -> list[TextItem]:
     """Group text-trace characters into single-line strings that share a baseline."""
     h = page.rect.height
+    m = page.rotation_matrix
     runs: list[dict] = []
     cur: dict | None = None
 
     for span in page.get_texttrace():
         if span.get("type") == 3 or (span.get("opacity") or 1) == 0:
             continue
-        dx, dy = span["dir"]
+        d0 = span["dir"]
+        dx, dy = d0[0] * m.a + d0[1] * m.c, d0[0] * m.b + d0[1] * m.d
         size = span["size"]
         layer = span.get("layer") or None
         color = _color(span.get("color"))
@@ -209,7 +217,9 @@ def extract_texts(page: pymupdf.Page, height_factor: float = 0.7) -> list[TextIt
             code, _glyph, origin, cb = ch[0], ch[1], ch[2], ch[3]
             c = chr(code) if code > 0 else "?"
             c = _REPLACE.get(c, c)
-            o = (origin[0], origin[1])
+            op = pymupdf.Point(origin) * m
+            o = (op.x, op.y)
+            cb = tuple(pymupdf.Rect(cb) * m)
             key = (round(dx, 3), round(dy, 3), round(size, 2), layer, color)
             if cur is not None and cur["key"] == key:
                 # PDF y points down: along = (dx, dy), up = (dy, -dx) in PDF space.

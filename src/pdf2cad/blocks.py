@@ -21,10 +21,14 @@ def components(shapes: list[Shape]) -> list[list[Shape]]:
     """Group shapes that touch or cross each other."""
     grid: Grid[tuple[int, int]] = Grid(4.0)
     segs: dict[int, list[tuple[Vec, Vec]]] = {}
+    boxes: dict[int, list[tuple[float, float, float, float]]] = {}
     for idx, s in enumerate(shapes):
         segs[idx] = _flat_segments(s)
+        boxes[idx] = []
         for k, (a, b) in enumerate(segs[idx]):
-            grid.insert((min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])), (idx, k))
+            box = (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+            boxes[idx].append(box)
+            grid.insert(box, (idx, k))
 
     parent = list(range(len(shapes)))
 
@@ -35,10 +39,15 @@ def components(shapes: list[Shape]) -> list[list[Shape]]:
         return i
 
     for idx in range(len(shapes)):
-        for a, b in segs[idx]:
-            box = (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+        for (a, b), box in zip(segs[idx], boxes[idx]):
+            x0, y0, x1, y1 = box[0] - TOUCH, box[1] - TOUCH, box[2] + TOUCH, box[3] + TOUCH
             for j, k in grid.query(box, TOUCH):
-                if j <= idx or find(j) == find(idx):
+                if j <= idx:
+                    continue
+                ob = boxes[j][k]
+                if ob[0] > x1 or ob[2] < x0 or ob[1] > y1 or ob[3] < y0:
+                    continue
+                if find(j) == find(idx):
                     continue
                 c, d = segs[j][k]
                 if segment_segment_distance(a, b, c, d) <= TOUCH:
