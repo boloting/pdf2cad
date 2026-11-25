@@ -183,6 +183,10 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
     if want_ocr:
         if ocrtext.available():
             ocr_counts = ocrtext.recognize(d, consumed, opts.progress)
+            if opts.dimensions and ocr_counts["text"]:
+                hint = (opts.scale if opts.scale and opts.scale > 0
+                        else getattr(d, "glyph_scale", None) or detect_scale(d))
+                dims.recognize(d, consumed, used_texts, opts.max_arrow_size, scale=hint, again=True)
         elif opts.ocr is True:
             warnings.append("没有安装文字识别组件（rapidocr-onnxruntime），转曲文字未识别。")
     strips_to_lines(d, consumed)
@@ -209,6 +213,8 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
         msg = f"用文字识别把 {ocr_counts['text']} 处转曲文字还原成了可编辑文字。"
         if ocr_counts["review"]:
             msg += f"其中 {ocr_counts['review']} 处把握不大，放在“PDF_文字_待核对”图层，请在 CAD 里核对。"
+        if getattr(d, "ocr_dims", 0):
+            msg += f"识别出的数字里有 {d.ocr_dims} 个和图上尺寸对得上，已重建为标注。"  # type: ignore[attr-defined]
         warnings.append(msg)
     glyph_dims = getattr(d, "glyph_dims", 0)
     if glyph_dims:

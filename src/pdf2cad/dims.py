@@ -42,6 +42,32 @@ def text_anchor(t: TextItem) -> Vec:
     return add(t.insert, rotate((w / 2, t.height / 2), t.rotation))
 
 
+def _part_anchor(t: TextItem, start: int, end: int) -> Vec:
+    """Centre of characters start..end of a text, assuming even character widths."""
+    n = max(1, len(t.text))
+    if start == 0 and end >= n:
+        return text_anchor(t)
+    w = t.width if t.width > 0 else (t.bbox[2] - t.bbox[0])
+    return add(t.insert, rotate((w * (start + end) / (2 * n), t.height / 2), t.rotation))
+
+
+def _shrink(t: TextItem, used: list[tuple[int, int]]) -> None:
+    """Drop the characters that went into dimensions, keeping the rest in place."""
+    n = len(t.text)
+    keep = [i for i in range(n) if not any(s <= i < e for s, e in used)]
+    if not keep:
+        t.text = ""
+        return
+    if not any(t.text[i].isalnum() for i in keep):
+        t.text = ""
+        return
+    first, last = keep[0], keep[-1] + 1
+    w = t.width if t.width > 0 else (t.bbox[2] - t.bbox[0])
+    t.insert = add(t.insert, rotate((w * first / n, 0.0), t.rotation))
+    t.width = w * (last - first) / n
+    t.text = t.text[first:last]
+
+
 def _style_match(a: Shape, b: Shape) -> bool:
     return a.style.layer == b.style.layer and a.style.color == b.style.color
 
@@ -169,8 +195,57 @@ def _arrow_shapes(a: Arrow) -> list[Shape]:
     return [a.shape, *getattr(a, "extra_shapes", [])]
 
 
-def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: float = 8.0) -> None:
+def _span_key(a: Vec, b: Vec) -> tuple:
+    return tuple(sorted(((round(a[0], 1), round(a[1], 1)), (round(b[0], 1), round(b[1], 1)))))
+
+
+def _value_options(text: str, expected: float | None) -> list[tuple[str, int, int]]:
+    """Ways to read a dimension value from text: (value text, start, end) within it.
+
+    Without an expected value any number goes.  With one, the number must agree with it,
+    and a run of digits that two crowded dimensions were read into may be split in two.
+    """
+    pv = parse_value(text)
+    if pv is None:
+        return []
+    if expected is None:
+        return [(text, 0, len(text))]
+    # Drawings often carry rounded or overridden values, so only reject clear mismatches.
+    tol = max(1.0, expected * 0.1)
+    if len(re.findall(r"\d+(?:\.\d+)?", text)) == 1 and abs(pv[0] - expected) <= tol:
+        return [(text, 0, len(text))]
+    out = []
+    for m in re.finditer(r"\d+", text):
+        if m.start() > 0 or m.end() < len(text):
+            if abs(float(m.group(0)) - expected) <= tol:
+                out.append((m.group(0), m.start(), m.end()))
+    if out:
+        return out
+    s = text.strip()
+    if not re.fullmatch(r"\d{3,}", s):
+        return []
+    for k in range(2, len(s) - 1):
+        for st, en in ((0, k), (k, len(s))):
+            part = s[st:en]
+            if part[0] != "0" and abs(float(part) - expected) <= tol:
+                out.append((part, st, en))
+    return out
+
+
+def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: float = 8.0,
+              scale: float | None = None, again: bool = False) -> None:
+    """Rebuild dimensions.  With again=True, a later pass over texts found since (OCR): spans
+    already dimensioned are skipped and, given the drawing scale, values must fit the geometry."""
     shapes = d.shapes
+    if not hasattr(d, "dim_spans"):
+        d.dim_spans = set()  # type: ignore[attr-defined]
+        d.dim_ticks = set()  # type: ignore[attr-defined]
+    spans: set[tuple] = d.dim_spans  # type: ignore[attr-defined]
+    tick_ids: set[int] = d.dim_ticks  # type: ignore[attr-defined]
+
+    def gone(sid: int) -> bool:
+        return sid in consumed and not (again and sid in tick_ids)
+
     arrows = detect_arrows(shapes, consumed, max_arrow)
     used_arrows: set[int] = set()
 
@@ -204,7 +279,7 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
     ticks: list[tuple[Vec, float, float, Shape]] = []
     tick_grid: Grid[int] = Grid(3.0)
     for s in shapes:
-        if s.id in consumed:
+        if gone(s.id):
             continue
         ax = _stroke_axis(s)
         if ax is None:
@@ -222,7 +297,7 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
         la = line_angle(a, b)
         for i in tick_grid.query((min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])), 0.2):
             m, ang, ln, t = ticks[i]
-            if t.id == line.id or t.id in consumed:
+            if t.id == line.id or gone(t.id):
                 continue
             if abs(angle_diff(ang, la) - 45) > 12:
                 continue
@@ -255,6 +330,8 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
         u = unit(sub(b, a))
         ia, ib = arrow_at(a, u), arrow_at(b, u)
         if ia is not None and ib is not None and ia != ib:
+            if _span_key(a, b) in spans:
+                continue
             cands.append(_Cand(s, a, b, (arrows[ia], arrows[ib]), 0.0))
             pairs_on_line[s.id] = 1
             continue
@@ -268,8 +345,8 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
             pb = add(a, mul(sub(b, a), p1))
             if dist(pa, pb) < 0.8:
                 continue
-            key = tuple(sorted(((round(pa[0], 1), round(pa[1], 1)), (round(pb[0], 1), round(pb[1], 1)))))
-            if key in seen_spans:
+            key = _span_key(pa, pb)
+            if key in seen_spans or key in spans:
                 continue
             seen_spans.add(key)
             a0 = Arrow(pa, mul(u, -1), l0 / math.sqrt(2), "tick", t0[0])
@@ -285,36 +362,41 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
             pairs_on_line[s.id] = len(tk) - 1
 
     # 2. Assign texts to candidate lines, nearest pairs first.
-    pairs: list[tuple[float, int, int]] = []
+    pairs: list[tuple[float, int, int, tuple[str, int, int]]] = []
     for ci, c in enumerate(cands):
+        expected = dist(c.a, c.b) * scale if scale else None
         la = line_angle(c.a, c.b)
         ln = dist(c.a, c.b)
         box = (min(c.a[0], c.b[0]), min(c.a[1], c.b[1]), max(c.a[0], c.b[0]), max(c.a[1], c.b[1]))
         for tid in text_grid.query(box, 12.0):
             t = texts[tid]
-            if tid in used_texts or not parse_value(t.text):
+            if tid in used_texts:
+                continue
+            options = _value_options(t.text, expected)
+            if not options:
                 continue
             parallel = angle_diff(t.rotation % 180, la) < 2.0
             if not parallel and angle_diff(t.rotation, 0, 360) > 2.0:
                 continue
-            ctr = text_anchor(t)
-            pd = point_line_distance(ctr, c.a, c.b)
-            limit = 1.6 * t.height + 1.0 if parallel else 2.5 * t.height + 1.0
-            if pd > limit:
-                continue
-            p = project_param(ctr, c.a, c.b)
-            if p < -0.2 - 3 * t.height / ln or p > 1.2 + 3 * t.height / ln:
-                continue
-            outside = max(0.0, -p, p - 1.0) * ln
-            pairs.append((pd + outside + abs(p - 0.5) * 0.05, ci, tid))
-    pairs.sort()
-    assigned: dict[int, int] = {}
-    taken: set[int] = set()
-    for _score, ci, tid in pairs:
-        if ci in assigned or tid in taken:
+            for opt in options:
+                ctr = _part_anchor(t, opt[1], opt[2])
+                pd = point_line_distance(ctr, c.a, c.b)
+                limit = 1.6 * t.height + 1.0 if parallel else 2.5 * t.height + 1.0
+                if pd > limit:
+                    continue
+                p = project_param(ctr, c.a, c.b)
+                if p < -0.2 - 3 * t.height / ln or p > 1.2 + 3 * t.height / ln:
+                    continue
+                outside = max(0.0, -p, p - 1.0) * ln
+                pairs.append((pd + outside + abs(p - 0.5) * 0.05, ci, tid, opt))
+    pairs.sort(key=lambda x: x[0])
+    assigned: dict[int, tuple[int, tuple[str, int, int]]] = {}
+    parts: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for _score, ci, tid, opt in pairs:
+        if ci in assigned or any(opt[1] < e and s0 < opt[2] for s0, e in parts[tid]):
             continue
-        assigned[ci] = tid
-        taken.add(tid)
+        assigned[ci] = (tid, opt)
+        parts[tid].append((opt[1], opt[2]))
 
     # 3. Extension lines and the DIMENSION itself.
     def extension(c: _Cand, p: Vec) -> tuple[Vec, float, Shape] | None:
@@ -378,20 +460,37 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
         dim.ext2 = e2 is not None  # type: ignore[attr-defined]
         dim.dle = c.dle  # type: ignore[attr-defined]
         d.linear_dims.append(dim)
+        spans.add(_span_key(c.a, c.b))
         emitted[c.line.id] += 1
         for arr in ends:
             for sh in _arrow_shapes(arr):
                 consumed.add(sh.id)
+                tick_ids.add(sh.id)
             for i, x in enumerate(arrows):
                 if x is arr:
                     used_arrows.add(i)
 
     for ci, c in enumerate(cands):
-        tid = assigned.get(ci)
-        if tid is not None:
+        if ci in assigned:
+            tid, (val, st, en) = assigned[ci]
             t = texts[tid]
-            emit(c, t.text, text_anchor(t), t.height, t.rotation)
+            emit(c, val, _part_anchor(t, st, en), t.height, t.rotation)
+            if again:
+                d.ocr_dims = getattr(d, "ocr_dims", 0) + 1  # type: ignore[attr-defined]
+    for tid, used in parts.items():
+        if any(s == 0 and e >= len(texts[tid].text) for s, e in used):
             used_texts.add(tid)
+        elif used:
+            _shrink(texts[tid], used)
+            if not texts[tid].text:
+                used_texts.add(tid)
+
+    if again:
+        for line_id, n in emitted.items():
+            if n >= pairs_on_line.get(line_id, 1):
+                consumed.add(line_id)
+        _radial_and_leaders(d, arrows, used_arrows, consumed, used_texts, by_id, text_grid, texts)
+        return
 
     # 4. Dimensions whose numbers are outlines/strokes rather than text objects.
     grid, pool = stroketext.glyph_pool(shapes, consumed)
@@ -434,6 +533,7 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
         learned = stroketext.learn(samples, COMMON_SCALES)
         if learned:
             scale, table = learned
+            d.glyph_scale = scale  # type: ignore[attr-defined]
             d.glyph_dims = 0  # type: ignore[attr-defined]
             for _s, ci, run in found:
                 chars = [table.get(cl) for cl in run.classes]  # type: ignore[attr-defined]

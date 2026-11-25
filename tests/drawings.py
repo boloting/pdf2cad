@@ -189,10 +189,10 @@ def outlined_dims_pdf(scale: float = 100 / 0.96) -> tuple[bytes, list[str], list
     return pg.save(), hx, vy
 
 
-def outlined_text_pdf(items) -> bytes:
+def outlined_text_pdf(items, lines=()) -> bytes:
     """Lettering drawn only as filled glyph outlines, as when a CAD plot outlines its fonts.
 
-    items: (text, (x, y), height, rotation in degrees).
+    items: (text, (x, y), height, rotation in degrees); lines: extra (start, end) strokes.
     """
     from ezdxf.addons import text2path
     from ezdxf.fonts import fonts
@@ -211,6 +211,8 @@ def outlined_text_pdf(items) -> bytes:
         sh.commit()
     pg.line((20, 20), (270, 20), width=0.5)
     pg.line((20, 20), (20, 190), width=0.5)
+    for p, q in lines:
+        pg.line(p, q, width=0.25)
     return pg.save()
 
 

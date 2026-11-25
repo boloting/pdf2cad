@@ -130,6 +130,29 @@ def test_outlined_lettering_becomes_text():
     assert len(msp.query("HATCH")) == 0
 
 
+def test_outlined_table_cells_read_separately():
+    pytest.importorskip("rapidocr_onnxruntime")
+    items = [("0", (150, 60), 4, 0), ("-70", (155.5, 60), 4, 0), ("CH=3500", (150, 50.5), 4, 0)]
+    x0, x1, y0, ym, y1 = 147, 172, 48.5, 57.5, 66
+    lines = [((x0, y0), (x1, y0)), ((x0, ym), (x1, ym)), ((x0, y1), (x1, y1)),
+             ((x0, y0), (x0, y1)), ((x1, y0), (x1, y1)), ((154, ym), (154, y1))]
+    r = convert_bytes(outlined_text_pdf(items, lines))
+    got = {t.text.replace("−", "-") for t in r.drawing.texts}
+    assert "0" in got and "-70" in got, got
+    assert not any("0-70" in t for t in got)
+
+
+def test_dimension_values_from_crowded_text():
+    from pdf2cad.dims import _value_options
+
+    assert _value_options("1300", 1296.0) == [("1300", 0, 4)]
+    assert _value_options("200,200", 191.0) == [("200", 0, 3), ("200", 4, 7)]
+    assert ("600", 0, 3) in _value_options("600200", 600.4)
+    assert ("200", 3, 6) in _value_options("600200", 199.0)
+    assert _value_options("FM甲1022", 300.0) == []
+    assert _value_options("2700", None) == [("2700", 0, 4)]
+
+
 def test_ocr_cleanup_rules():
     from pdf2cad.ocrtext import clean
 

@@ -9,6 +9,7 @@ vote on a common reading, which fixes most single misreadings.
 
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from statistics import median
 from typing import Callable
 
 from .dims import _stroke_axis
-from .model import Drawing, Shape, TextItem
+from .model import Drawing, Line, Shape, TextItem
 from .spatial import Grid
 
 PX = 14.0  # render resolution, pixels per paper millimetre
@@ -91,6 +92,10 @@ def _frame_bbox(s: Shape, vertical: bool):
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def _area(b) -> float:
+    return (b[2] - b[0]) * (b[3] - b[1])
+
+
 def _render(shapes: list[Shape], box, vertical: bool):
     from PIL import Image, ImageDraw
 
@@ -103,10 +108,18 @@ def _render(shapes: list[Shape], box, vertical: bool):
         q = _to_frame(p, vertical)
         return ((q[0] - x0) * PX, (y1 - q[1]) * PX)
 
+    # Outlined glyphs come as separate contours; a contour inside another is a hole (even-odd).
+    fills = sorted((s for s in shapes if s.fill is not None and len(s.points()) > 2),
+                   key=lambda s: -_area(s.bbox()))
+    seen: Grid[tuple] = Grid(5.0)
+    for s in fills:
+        b = s.bbox()
+        depth = sum(1 for o in seen.query(b)
+                    if o[0] <= b[0] and o[1] <= b[1] and o[2] >= b[2] and o[3] >= b[3] and o != b)
+        seen.insert(b, b)
+        dr.polygon([tp(p) for p in s.points()], fill=255 if depth % 2 else 0)
     for s in shapes:
         pts = [tp(p) for p in s.points()]
-        if s.fill is not None and len(pts) > 2:
-            dr.polygon(pts, fill=0)
         if s.stroke and len(pts) > 1:
             if s.closed:
                 pts = pts + [pts[0]]
@@ -145,13 +158,37 @@ def _plausible(text: str, score: float) -> bool:
 class _Frame:
     """Candidate shapes indexed in one reading orientation."""
 
-    def __init__(self, cands: list[Shape], vertical: bool) -> None:
+    def __init__(self, cands: list[Shape], vertical: bool, all_shapes: list[Shape], eng=None) -> None:
         self.vertical = vertical
+        self.eng = eng
         self.boxes = {s.id: _frame_bbox(s, vertical) for s in cands}
         self.by_id = {s.id: s for s in cands}
         self.grid: Grid[int] = Grid(10.0)
         for sid, b in self.boxes.items():
             self.grid.insert(b, sid)
+        # Segments across the reading direction: table cell borders that split a line of text.
+        self.walls: list[tuple[float, float, float]] = []
+        self.wall_grid: Grid[int] = Grid(10.0)
+        for sh in all_shapes:
+            for g in sh.segs:
+                if not isinstance(g, Line):
+                    continue
+                p, q = _to_frame(g.start(), vertical), _to_frame(g.end(), vertical)
+                dy = abs(q[1] - p[1])
+                if dy >= 1.5 and abs(q[0] - p[0]) <= 0.03 * dy:
+                    x, ya, yb = (p[0] + q[0]) / 2, min(p[1], q[1]), max(p[1], q[1])
+                    self.wall_grid.insert((x, ya, x, yb), len(self.walls))
+                    self.walls.append((x, ya, yb))
+
+    def walls_across(self, x0: float, y0: float, x1: float, y1: float, max_len: float) -> list[float]:
+        """x of borders crossing the whole text height strictly inside (x0, x1)."""
+        slack = 0.1 * (y1 - y0)
+        out = set()
+        for i in self.wall_grid.query((x0, y0, x1, y1)):
+            x, ya, yb = self.walls[i]
+            if x0 < x < x1 and ya <= y0 - slack and yb >= y1 + slack and yb - ya <= max_len:
+                out.add(round(x, 2))
+        return sorted(out)
 
     def inside(self, region, exclude: set[int]) -> list[Shape]:
         x0, y0, x1, y1 = region
@@ -204,12 +241,40 @@ def clean(text: str) -> str:
     return text
 
 
-def _accept(found: list[Found], frame: _Frame, text: str, score: float, box, claimed: set[int]) -> bool:
+def _split(found: list[Found], frame: _Frame, glyphs: list[Shape], cuts: list[float], claimed: set[int]) -> bool:
+    """Read each piece of a line of text between table borders on its own."""
+    edges = [-math.inf, *cuts, math.inf]
+    ok = False
+    for lo, hi in zip(edges, edges[1:]):
+        part = [s for s in glyphs if frame.boxes[s.id][0] >= lo and frame.boxes[s.id][2] <= hi]
+        if not part:
+            continue
+        bs = [frame.boxes[s.id] for s in part]
+        x0, y0 = min(b[0] for b in bs), min(b[1] for b in bs)
+        x1, y1 = max(b[2] for b in bs), max(b[3] for b in bs)
+        pad = max(1.0, 0.8 * (y1 - y0))
+        region = (max(lo + 0.05, x0 - pad), y0 - pad, min(hi - 0.05, x1 + pad), y1 + pad)
+        for text, score, box in _read(frame.eng, frame, region, claimed):
+            ok |= _accept(found, frame, text, score, box, claimed, split=False)
+    return ok
+
+
+def _accept(found: list[Found], frame: _Frame, text: str, score: float, box, claimed: set[int],
+            split: bool = True) -> bool:
     text = clean(text)
-    if not _plausible(text, score):
-        return False
     glyphs = frame.glyphs(box, claimed)
     if not glyphs:
+        return False
+    if split and frame.eng is not None and len(text) > 1:
+        bs = [frame.boxes[s.id] for s in glyphs]
+        gx0, gy0 = min(b[0] for b in bs), min(b[1] for b in bs)
+        gx1, gy1 = max(b[2] for b in bs), max(b[3] for b in bs)
+        h = gy1 - gy0
+        cuts = [x for x in frame.walls_across(gx0, gy0, gx1, gy1, 6.0 * h)
+                if not any(b[0] - 0.05 * h < x < b[2] + 0.05 * h for b in bs)]
+        if cuts:
+            return _split(found, frame, glyphs, cuts, claimed)
+    if not _plausible(text, score):
         return False
     # Ticks or symbols caught in the box would inflate the text height: keep glyph-sized shapes.
     core = [s for s in glyphs if not s.is_single_line and _stroke_axis(s) is None]
@@ -281,6 +346,79 @@ def _vertical_pass(eng, frame: _Frame, boxes: list[tuple], claimed: set[int], pr
     return found
 
 
+LONE_NUMBER = re.compile(r"[-−]?\d+(?:\.\d+)?")
+
+
+def _leftover_pass(eng, frame: _Frame, found: list[Found], claimed: set[int]) -> list[Found]:
+    """Lone numbers (a "0" in a table cell) that the detector skips: read glyph-height clusters directly."""
+    import numpy as np
+
+    heights = Counter(round(f.y1 - f.y0, 1) for f in found if not f.vertical and not CJK.search(f.text))
+    need = min(3, max(1, len(found) // 2))
+    common = [h for h, n in heights.items() if n >= need and h >= 0.8]
+    if not common:
+        return []
+    big = 1.3 * max(common)
+
+    def small(sid: int) -> bool:
+        b, s = frame.boxes[sid], frame.by_id[sid]
+        if s.fill is None and len(s.segs) == 4 and all(isinstance(g, Line) for g in s.segs):
+            return False  # a table cell
+        return b[2] - b[0] <= big and b[3] - b[1] <= big
+
+    ids = [sid for sid in frame.boxes if sid not in claimed and small(sid)]
+    parent = {sid: sid for sid in ids}
+
+    def root(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    gap = 0.4
+    for sid in ids:
+        b = frame.boxes[sid]
+        for o in frame.grid.query((b[0] - gap, b[1] - gap, b[2] + gap, b[3] + gap)):
+            if o in parent and o != sid:
+                ob = frame.boxes[o]
+                if ob[0] <= b[2] + gap and ob[2] >= b[0] - gap and ob[1] <= b[3] + gap and ob[3] >= b[1] - gap:
+                    parent[root(o)] = root(sid)
+    groups: dict[int, list[int]] = defaultdict(list)
+    for sid in ids:
+        groups[root(sid)].append(sid)
+    out: list[Found] = []
+    for members in groups.values():
+        bs = [frame.boxes[i] for i in members]
+        x0, y0 = min(b[0] for b in bs), min(b[1] for b in bs)
+        x1, y1 = max(b[2] for b in bs), max(b[3] for b in bs)
+        h = y1 - y0
+        if not any(abs(h - c) <= 0.08 * c for c in common) or not 0.3 * h <= x1 - x0 <= 4 * h:
+            continue
+        mset = set(members)
+        near = frame.grid.query((x0 - h, y0 - h, x1 + h, y1 + h))
+        if any(o not in mset and o not in claimed and small(o) and not frame.by_id[o].is_single_line
+               for o in near):
+            continue  # part of a line of text the detector could not read, e.g. one set vertically
+        shapes = [frame.by_id[i] for i in members]
+        if any(s.is_single_line and max(frame.boxes[s.id][2] - frame.boxes[s.id][0], h) > 1.05 * h
+               for s in shapes):
+            continue
+        pad = 0.6 * h
+        img = _render(shapes, (x0 - pad, y0 - pad, x1 + pad, y1 + pad), frame.vertical)
+        res, _ = eng(np.array(img.convert("RGB")), use_det=False, use_cls=False, use_rec=True)
+        if not res:
+            continue
+        text, score = res[0][0].strip(), float(res[0][1])
+        text = clean(text)
+        if text in ("O", "o"):
+            text = "0"
+        if score < 0.9 or not LONE_NUMBER.fullmatch(text):
+            continue
+        claimed.update(members)
+        out.append(Found(text, score, shapes, frame.vertical, x0, y0, x1, y1))
+    return out
+
+
 def _merge_boxes(boxes: list[tuple]) -> list[tuple]:
     out: list[list[float]] = []
     for b in sorted(boxes):
@@ -337,8 +475,10 @@ def recognize(d: Drawing, consumed: set[int], progress: Callable[[float], None] 
         return {"text": 0, "review": 0}
     eng = _get_engine()
     claimed: set[int] = set()
-    found, upright = _horizontal_pass(eng, _Frame(cands, False), claimed, progress, 0.0, 0.85)
-    found += _vertical_pass(eng, _Frame(cands, True), upright, claimed, progress, 0.85, 1.0)
+    hframe = _Frame(cands, False, d.shapes, eng)
+    found, upright = _horizontal_pass(eng, hframe, claimed, progress, 0.0, 0.85)
+    found += _vertical_pass(eng, _Frame(cands, True, d.shapes, eng), upright, claimed, progress, 0.85, 1.0)
+    found += _leftover_pass(eng, hframe, found, claimed)
     _vote(found)
     if found:
         # Door swings and similar loops read as "0"/"O" stand out by their size.
@@ -352,11 +492,14 @@ def recognize(d: Drawing, consumed: set[int], progress: Callable[[float], None] 
         has_cjk = bool(CJK.search(f.text))
         height = gh / 1.15 if has_cjk else gh
         insert = _from_frame((f.x0, f.y0), f.vertical)
+        corners = [_from_frame(q, f.vertical) for q in ((f.x0, f.y0), (f.x1, f.y1))]
+        bbox = (min(c[0] for c in corners), min(c[1] for c in corners),
+                max(c[0] for c in corners), max(c[1] for c in corners))
         styles = Counter((s.fill if s.fill is not None else s.style.color) for s in f.shapes)
         t = TextItem(
             text=f.text, insert=insert, height=round(height, 3), rotation=90.0 if f.vertical else 0.0,
             layer=None, color=styles.most_common(1)[0][0], font="ocr",
-            bbox=(0, 0, 0, 0), width=f.x1 - f.x0, id=next_id,
+            bbox=bbox, width=f.x1 - f.x0, id=next_id,
         )
         t.review = f.score < REVIEW_SCORE  # type: ignore[attr-defined]
         review += t.review  # type: ignore[attr-defined]
