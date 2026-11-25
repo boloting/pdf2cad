@@ -10,7 +10,7 @@ from statistics import median
 import ezdxf
 from ezdxf.document import Drawing as DXFDocument
 from ezdxf.lldxf.const import VALID_DXF_LINEWEIGHTS
-from ezdxf.math import Bezier4P, bezier_to_bspline
+from ezdxf.math import Bezier4P, Vec3, bezier_to_bspline
 
 from .dims import parse_value
 from .model import Arc, Bezier, Color, Drawing, Hatch, Line, Shape, Style
@@ -73,6 +73,10 @@ class Writer:
     def X(self, p) -> tuple[float, float]:
         return (p[0] * self.s, p[1] * self.s)
 
+    def L(self, v: float) -> float:
+        """A paper length (text height, arrow size) in model units."""
+        return round(v * self.s, 4)
+
     def layer_name(self, layer: str | None, kind: str, style: Style | None = None) -> str:
         if layer:
             name = layer
@@ -125,7 +129,7 @@ class Writer:
         whole = len(runs) == 1
         for run in runs:
             if isinstance(run[0], Bezier):
-                curves = [Bezier4P([self.X(b.p0), self.X(b.p1), self.X(b.p2), self.X(b.p3)]) for b in run]
+                curves = [Bezier4P([Vec3(self.X(p)) for p in (b.p0, b.p1, b.p2, b.p3)]) for b in run]
                 target.add_spline(dxfattribs=a).apply_construction_tool(bezier_to_bspline(curves))
                 self.counts["SPLINE"] += 1
             elif len(run) == 1 and isinstance(run[0], Arc) and run[0].is_full:
@@ -152,8 +156,15 @@ class Writer:
                 for p in g.flatten(12)[:-1]:
                     pts.append((*self.X(p), 0.0))
                 continue
-            bulge = math.tan(math.radians(g.sweep) / 4) if isinstance(g, Arc) else 0.0
-            pts.append((*self.X(g.start()), bulge))
+            if isinstance(g, Arc):
+                # A bulge cannot describe a full turn; split big arcs in halves.
+                parts = 2 if abs(g.sweep) > 180 else 1
+                step = g.sweep / parts
+                bulge = math.tan(math.radians(step) / 4)
+                for k in range(parts):
+                    pts.append((*self.X(g.point_at(g.start_angle + k * step)), bulge))
+                continue
+            pts.append((*self.X(g.start()), 0.0))
         if not closed:
             pts.append((*self.X(segs[-1].end()), 0.0))
         return pts
@@ -173,16 +184,18 @@ class Writer:
         ex = [x.exe for x in d.linear_dims if x.exe > 0]
         kinds = Counter(x.arrow_kind for x in d.linear_dims)
         ds = self.doc.dimstyles.new(DIM_STYLE)
-        ds.dxf.dimtxt = round(median(th), 3) if th else 2.5
-        ds.dxf.dimasz = round(median(az), 3) if az else 2.5
-        ds.dxf.dimexe = round(median(ex), 3) if ex else 1.25
+        # Sizes are written in model units with DIMSCALE 1: some CAD programs
+        # (LibreCAD among them) ignore DIMSCALE when they regenerate dimensions.
+        ds.dxf.dimtxt = self.L(median(th) if th else 2.5)
+        ds.dxf.dimasz = self.L(median(az) if az else 2.5)
+        ds.dxf.dimexe = self.L(median(ex) if ex else 1.25)
         ds.dxf.dimexo = 0.0
-        ds.dxf.dimgap = 0.6
+        ds.dxf.dimgap = self.L(0.6)
         ds.dxf.dimtad = 1
         ds.dxf.dimtih = 0
         ds.dxf.dimtoh = 0
         ds.dxf.dimtmove = 2
-        ds.dxf.dimscale = self.s
+        ds.dxf.dimscale = 1.0
         ds.dxf.dimdec = 0
         ds.dxf.dimzin = 8
         ds.dxf.dimdsep = ord(".")
@@ -207,18 +220,24 @@ class Writer:
             return text[:start] + "<>" + text[end:], override
         return text, override
 
+    @staticmethod
+    def dim_colors(attribs: dict) -> dict:
+        """Explicit part colours: viewers disagree on BYBLOCK under a BYLAYER parent."""
+        aci = attribs.get("color")
+        return {"dimclrd": aci, "dimclre": aci, "dimclrt": aci} if aci else {}
+
     def linear_dims(self) -> None:
         for dim in self.d.linear_dims:
             a = self.attribs(dim.layer, "dim", dim.color)
-            a.pop("lineweight", None)
             text, ov = self.dim_text(dim.text, dim.measured * self.s)
+            ov.update(self.dim_colors(a))
             ov.update(
-                dimtxt=round(dim.text_height, 4), dimasz=round(dim.arrow_size, 4),
-                dimexe=round(dim.exe, 4), dimse1=0 if getattr(dim, "ext1", True) else 1,
+                dimtxt=self.L(dim.text_height), dimasz=self.L(dim.arrow_size),
+                dimexe=self.L(dim.exe), dimse1=0 if getattr(dim, "ext1", True) else 1,
                 dimse2=0 if getattr(dim, "ext2", True) else 1,
             )
             if getattr(dim, "dle", 0) > 0:
-                ov["dimdle"] = round(dim.dle, 4)
+                ov["dimdle"] = self.L(dim.dle)
             blk = _ARROW_BLOCKS.get(dim.arrow_kind, "")
             ov["dimblk"] = blk
             text_rot = None
@@ -242,8 +261,8 @@ class Writer:
             if f"{prefix}<>" in text or f"{prefix.lower()}<>" in text:
                 text = text.replace(f"{prefix}<>", "<>").replace(f"{prefix.lower()}<>", "<>")
             ov.update(
-                dimtxt=round(dim.text_height, 4), dimasz=round(dim.arrow_size, 4), dimtix=0, dimtofl=0,
-                dimtih=1, dimtoh=1,
+                dimtxt=self.L(dim.text_height), dimasz=self.L(dim.arrow_size), dimtix=0, dimtofl=0,
+                dimtih=1, dimtoh=1, **self.dim_colors(a),
             )
             fn = self.msp.add_diameter_dim if dim.kind == "diameter" else self.msp.add_radius_dim
             r = fn(
@@ -259,7 +278,7 @@ class Writer:
             a = self.attribs(ld.layer, "dim", ld.color)
             self.msp.add_leader(
                 [self.X(v) for v in ld.vertices], dimstyle=DIM_STYLE,
-                override={"dimasz": round(ld.arrow_size, 4)}, dxfattribs=a,
+                override={"dimasz": self.L(ld.arrow_size), **self.dim_colors(a)}, dxfattribs=a,
             )
             self.counts["LEADER"] += 1
             t = getattr(ld, "text_item", None)
@@ -301,7 +320,7 @@ class Writer:
         doc.styles.new(TEXT_STYLE, dxfattribs={"font": "simsun.ttc", "width": 1.0})
         doc.header["$LWDISPLAY"] = 1
         doc.header["$LTSCALE"] = 1.0
-        doc.header["$DIMSCALE"] = self.s
+        doc.header["$DIMSCALE"] = 1.0
         self.setup_dimstyle()
         doc.header["$DIMSTYLE"] = DIM_STYLE
 
@@ -312,7 +331,7 @@ class Writer:
         block_counts = Counter(self.counts)
         self.counts.clear()
         for ins in d.inserts:
-            a = {"layer": self.layer_name(ins.layer, "geometry"), "rotation": ins.rotation}
+            a = {"layer": self.layer_name(ins.layer, "geometry", ins.style), "rotation": ins.rotation}
             self.msp.add_blockref(ins.name, self.X(ins.insert), dxfattribs=a)
             self.counts["INSERT"] += 1
 
@@ -350,7 +369,7 @@ class Writer:
                 layer.color = ca["color"]
             elif "true_color" in ca:
                 layer.rgb = tuple(int(round(v * 255)) for v in common)  # type: ignore[union-attr]
-        for name in {self.layer_name(i.layer, "geometry") for i in self.d.inserts}:
+        for name in {self.layer_name(i.layer, "geometry", i.style) for i in self.d.inserts}:
             if name not in self.doc.layers:
                 self.doc.layers.add(name)
         self._colors_bylayer()
@@ -360,7 +379,9 @@ class Writer:
         layouts = [self.msp, *(b for b in self.doc.blocks if not b.name.startswith("*"))]
         for lay in layouts:
             for e in lay:
-                if e.dxftype() == "HATCH" or not e.dxf.hasattr("layer"):
+                # Dimension and leader parts are BYBLOCK; viewers disagree on resolving
+                # BYBLOCK through a BYLAYER parent, so those keep an explicit colour.
+                if e.dxftype() in ("HATCH", "DIMENSION", "LEADER") or not e.dxf.hasattr("layer"):
                     continue
                 layer = self.doc.layers.get(e.dxf.layer)
                 if layer is None:

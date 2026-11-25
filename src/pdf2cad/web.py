@@ -128,14 +128,15 @@ def convert(
             )
             result = convert_page(pdf, opts)
         w, h = result.report.page_size_mm
+        s = result.report.scale
         stem = Path(file.filename or "drawing.pdf").stem or "drawing"
         stored = Stored(
             created=time.time(),
             filename=f"{stem}.dxf" if result.report.page_count == 1 else f"{stem}_p{page}.dxf",
             dxf=result.dxf_bytes(),
             source_svg=pdf_page_svg(data, page - 1),
-            preview_svg=dxf_svg(result.doc, w, h),
-            highlight_svg=dxf_svg(result.doc, w, h, highlight=True),
+            preview_svg=dxf_svg(result.doc, w, h, s),
+            highlight_svg=dxf_svg(result.doc, w, h, s, highlight=True),
         )
     finally:
         busy.release()

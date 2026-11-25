@@ -257,11 +257,11 @@ def extract_texts(page: pymupdf.Page, height_factor: float = 0.7) -> list[TextIt
 
 def _char_end(origin, cb, dx, dy) -> tuple[float, float]:
     """Origin of the next character: the far edge of this glyph's box along the baseline."""
-    if abs(dx) >= abs(dy):
-        x = cb[2] if dx > 0 else cb[0]
-        return (x, origin[1])
-    y = cb[3] if dy > 0 else cb[1]
-    return (origin[0], y)
+    # The box centre is the glyph rectangle's centre at any rotation, and it sits
+    # half an advance along the baseline from the origin.
+    cx, cy = (cb[0] + cb[2]) / 2, (cb[1] + cb[3]) / 2
+    adv = max(0.0, 2 * ((cx - origin[0]) * dx + (cy - origin[1]) * dy))
+    return (origin[0] + dx * adv, origin[1] + dy * adv)
 
 
 def extract_page(page: pymupdf.Page, text_height_factor: float = 0.7) -> Drawing:

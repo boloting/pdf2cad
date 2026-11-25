@@ -91,16 +91,25 @@ def _canonical(group: list[Shape], rot: float) -> tuple[tuple, Vec]:
     return keys, c
 
 
-def recognize(d: Drawing, consumed: set[int], min_shapes: int = 2, min_count: int = 2) -> None:
-    shapes = [s for s in d.shapes if s.id not in consumed]
+def recognize(d: Drawing, consumed: set[int], min_shapes: int = 2, min_count: int = 2,
+              max_size: float = 0.15) -> None:
     diag = math.hypot(d.width, d.height)
+    limit = max_size * diag
+
+    def small(s: Shape) -> bool:
+        b = s.bbox()
+        return math.hypot(b[2] - b[0], b[3] - b[1]) <= limit
+
+    # Long shapes (walls, frames, axes) cannot be part of a block; leaving them out
+    # keeps a door that touches a wall from merging into the wall's component.
+    shapes = [s for s in d.shapes if s.id not in consumed and small(s)]
     sigs: dict[tuple, list[tuple[list[Shape], float, Vec]]] = defaultdict(list)
     for group in components(shapes):
         if len(group) < min_shapes:
             continue
         pts = [p for s in group for p in s.points()]
         b = bbox(pts)
-        if math.hypot(b[2] - b[0], b[3] - b[1]) > 0.25 * diag:
+        if math.hypot(b[2] - b[0], b[3] - b[1]) > limit:
             continue
         best = None
         for rot in (0.0, 90.0, 180.0, 270.0):
@@ -123,11 +132,11 @@ def recognize(d: Drawing, consumed: set[int], min_shapes: int = 2, min_count: in
 
         d.blocks.append(BlockDef(name, [s.transformed(to_local, rot0) for s in group0]))
         for group, rot, c in instances:
-            layers = defaultdict(int)
+            styles: dict = defaultdict(int)
             for s in group:
-                layers[s.style.layer] += 1
-            layer = max(layers, key=lambda k: layers[k])
-            d.inserts.append(Insert(name, rotate(c, -rot), (-rot) % 360, layer))
+                styles[s.style] += 1
+            style = max(styles, key=lambda k: styles[k])
+            d.inserts.append(Insert(name, rotate(c, -rot), (-rot) % 360, style.layer, style))
             consumed.update(s.id for s in group)
 
 

@@ -75,7 +75,6 @@ def _families(lines: list[Shape], min_lines: int) -> list[list[Shape]]:
         return []
     diffs = [b - a for a, b in zip(uniq, uniq[1:])]
     out: list[list[Shape]] = []
-    start = 0
     i = 0
     while i < len(diffs):
         s = diffs[i]
@@ -88,8 +87,6 @@ def _families(lines: list[Shape], min_lines: int) -> list[list[Shape]]:
             fam = [x for x in items if lo <= off(x) <= hi]
             out.extend(_split_spatial(fam, u, s))
         i = j + 1
-        start = i
-    del start
     return [f for f in out if len({round(off(x), 2) for x in f}) >= min_lines]
 
 
@@ -187,18 +184,23 @@ def recognize_pattern(d: Drawing, consumed: set[int], min_lines: int = 4) -> Non
         s for s in d.shapes
         if s.id not in consumed and s.stroke and s.is_single_line and not s.style.dashes
     ]
+    # CAD exporters usually write one hatch as one path; lines from such a path are
+    # grouped on their own so stray parallel lines elsewhere cannot join them.
+    per_path: dict[int, int] = defaultdict(int)
+    for s in lines:
+        per_path[s.path_id] += 1
     groups: dict[tuple, list[Shape]] = defaultdict(list)
     for s in lines:
         a = line_angle(s.segs[0].start(), s.segs[0].end())
-        key = (s.style, round(a * 2) / 2 % 180)
-        groups[key].append(s)
+        pid = s.path_id if per_path[s.path_id] >= min_lines else -1
+        groups[(s.style, round(a * 2) / 2 % 180, pid)].append(s)
     loops = [
         s for s in d.shapes
         if s.id not in consumed and s.closed and (len(s.segs) > 1 or s.is_circle)
     ]
 
     found: list[tuple[Hatch, list[Shape], list[Seg] | None]] = []
-    for (style, ang), group in groups.items():
+    for (style, _ang, _pid), group in groups.items():
         for fam in _families(group, min_lines):
             pts = _endpoints(fam)
             r = math.radians(line_angle(fam[0].segs[0].start(), fam[0].segs[0].end()))

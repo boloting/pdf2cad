@@ -264,6 +264,7 @@ class Insert:
     insert: Vec
     rotation: float
     layer: str | None
+    style: Style | None = None
 
 
 @dataclass

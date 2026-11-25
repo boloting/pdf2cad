@@ -1,0 +1,106 @@
+# PDF2CAD：矢量 PDF 图纸转 DXF
+
+PDF2CAD 把矢量 PDF 图纸（由 CAD 导出或打印的 PDF）转成 DXF，并尽量把笔画还原成真正的 CAD 对象，而不是打散的线条：
+
+| PDF 里的内容 | 转成的 DXF 对象 |
+| --- | --- |
+| 尺寸线 + 界线 + 箭头/斜线/圆点 + 数字 | `DIMENSION` 线性/对齐标注，数值与几何关联（`<>`） |
+| 指向圆的引线 + `Φ12` / `R6` | `DIMENSION` 直径/半径标注 |
+| 箭头 + 折线 + 文字 | `LEADER` + `TEXT` |
+| 闭合的实心填充路径 | 实心 `HATCH` |
+| 等距平行线（含交叉线、带孤岛） | 图案 `HATCH`，45° 线命名为 `ANSI31` / `ANSI37`，边界自动查找 |
+| 重复出现的图形（平移、旋转 90°/180°/270°） | `BLOCK` 定义 + `INSERT` |
+| 文本对象 | `TEXT`，保留字高、角度和图层，`Ø ± °` 转成 `%%c %%p %%d` |
+| 四段贝塞尔曲线组成的圆、圆弧 | `CIRCLE` / `ARC`，多段路径写成带凸度的 `LWPOLYLINE` |
+| 其他曲线 | `SPLINE` |
+| PDF 图层（可选内容组） | 同名图层；没有图层时按颜色和线宽分层 |
+| 虚线、点划线 | 按实际间距生成线型 |
+| 线宽、颜色 | 线宽和颜色（标准色用 ACI，其余用真彩色） |
+
+程序还会比对标注数字和图上长度，自动推算绘图比例（例如 1:100），按真实尺寸输出模型。
+
+## 运行
+
+需要 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。
+
+```bash
+uv sync
+```
+
+### 网页界面
+
+```bash
+uv run pdf2cad-web          # 默认 http://127.0.0.1:8765
+PORT=9000 uv run pdf2cad-web
+```
+
+上传 PDF 后，可以在三种视图里查看结果：
+
+- **识别着色**：按识别结果着色，标注蓝色、图块绿色、填充橙色、文字紫色。
+- **DXF 预览**：转换后的 DXF。
+- **原始 PDF**：原图，方便对比。
+
+确认无误后下载 DXF。页面上的“用示例图纸试一试”会载入内置的示例图纸。
+
+### 命令行
+
+```bash
+uv run pdf2cad 图纸.pdf                   # 输出 图纸.dxf，比例按标注自动识别
+uv run pdf2cad 图纸.pdf -o 输出.dxf -s 100 # 手动指定 1:100
+uv run pdf2cad 图纸.pdf --all-pages       # 每页一个 DXF
+uv run pdf2cad 图纸.pdf --no-blocks --json # 关闭图块识别，输出 JSON 报告
+```
+
+### Python
+
+```python
+from pdf2cad import Options, convert_file
+
+result = convert_file("图纸.pdf", Options(page=0, scale=None))
+result.doc.saveas("图纸.dxf")   # ezdxf 文档
+print(result.report.recognized)
+```
+
+### 测试
+
+```bash
+uv run pytest
+```
+
+`examples/sample.pdf` 是示例图纸（安装板，1:2），`examples/sample.dxf` 是它的转换结果。重新生成示例：`uv run python -m pdf2cad.sample examples/sample.pdf`。
+
+## 工作原理
+
+1. **提取**（`extract.py`）：用 PyMuPDF 读取页面路径和逐字文字，统一成纸面毫米、y 轴向上的坐标。四段贝塞尔圆拟合回圆或圆弧，同一基线上的字符合并成字符串。
+2. **标注**（`dims.py`）：先识别箭头（实心或空心三角、开口箭头、建筑斜线、圆点）。两端都有箭头的直线是尺寸线，再为它匹配最近的平行数字文字，并找同样式、垂直、穿过端点的界线。指向圆周的箭头折线配上 `Φ` 或 `R` 文字，就是直径或半径标注；其余的箭头折线加文字是引线。
+3. **填充**（`hatch.py`）：填充路径转成实心 `HATCH`。同样式、等间距的平行线族转成图案 `HATCH`；边界依次尝试三种来源：图上已有的闭合轮廓（含孤岛）、端点凸包、逐行端点扫描出的多边形。
+4. **图块**（`blocks.py`）：把相互接触的小图形分组，在四个旋转方向上计算规范化签名，签名相同的组归为同一个图块。墙线、图框这类长线不参与分组，所以贴着墙的门窗也能单独成块。
+5. **写出**（`writer.py`）：用 ezdxf 写 R2018 DXF，生成 `PDF` 标注样式、`PDF_TEXT` 文字样式（宋体 `simsun.ttc`）、线型和图层。
+
+## 限制
+
+- 只支持矢量 PDF。扫描件或图片 PDF 里没有可用的几何。
+- 导出时被“转曲”的文字只剩轮廓，会作为填充图形保留，无法还原成字符串。依赖这些文字的标注也无法识别。
+- 标注重建后数值是关联的，但不会和几何绑定（没有关联标注）。角度标注、坐标标注和弧长标注暂不识别。
+- 图块名由程序生成（`PDF_BLOCK_01`…），PDF 里没有原来的块名和属性。镜像的图块实例不会和原块合并。
+- 椭圆写成 `SPLINE`。
+- 一页里的多个视口按同一个比例输出；比例不同的局部视图需要在 CAD 里自行缩放。
+- DXF 里的文字样式使用宋体。在 LibreCAD 这类不支持 TrueType 中文字体的软件里，中文会显示成占位符；AutoCAD、中望 CAD、浩辰 CAD 显示正常。
+
+## 目录
+
+```
+src/pdf2cad/
+  extract.py   PDF 路径与文字提取、曲线拟合
+  dims.py      箭头、线性/对齐/半径/直径标注、引线
+  hatch.py     实心与图案填充、边界查找
+  blocks.py    重复图形 -> 图块
+  writer.py    DXF 输出（ezdxf）
+  convert.py   流水线、比例推算、报告
+  preview.py   PDF 与 DXF 的 SVG 预览
+  web.py       FastAPI 网页服务
+  cli.py       命令行
+  sample.py    示例图纸生成器
+  static/      网页前端
+tests/         测试与合成测试图
+```

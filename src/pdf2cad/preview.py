@@ -8,6 +8,7 @@ import pymupdf
 from ezdxf.addons.drawing import Frontend, RenderContext, config, layout, svg
 from ezdxf.addons.drawing.properties import LayoutProperties
 from ezdxf.document import Drawing as DXFDocument
+from ezdxf.math import BoundingBox2d
 
 # Colours for the "what was recognized" view, keyed by DXF entity type.
 HIGHLIGHT = {
@@ -42,20 +43,21 @@ def _preview_font() -> str | None:
     return None
 
 
-def dxf_svg(doc: DXFDocument, width_mm: float, height_mm: float, highlight: bool = False) -> str:
+def dxf_svg(doc: DXFDocument, width_mm: float, height_mm: float, scale: float = 1.0, highlight: bool = False) -> str:
+    """Render model space framed to the sheet: (0, 0) to the page size times the drawing scale."""
     style = doc.styles.get("PDF_TEXT")
     original = style.dxf.font if style is not None else None
     font = _preview_font()
     if style is not None and font:
         style.dxf.font = font
     try:
-        return _render(doc, width_mm, height_mm, highlight)
+        return _render(doc, width_mm, height_mm, scale, highlight)
     finally:
         if style is not None and original:
             style.dxf.font = original
 
 
-def _render(doc: DXFDocument, width_mm: float, height_mm: float, highlight: bool) -> str:
+def _render(doc: DXFDocument, width_mm: float, height_mm: float, scale: float, highlight: bool) -> str:
     msp = doc.modelspace()
     ctx = RenderContext(doc)
     backend = svg.SVGBackend()
@@ -88,7 +90,8 @@ def _render(doc: DXFDocument, width_mm: float, height_mm: float, highlight: bool
         frontend.draw_layout(msp, layout_properties=props)
     page = layout.Page(width_mm, height_mm, layout.Units.mm, margins=layout.Margins.all(0))
     settings = layout.Settings(fit_page=True, min_stroke_width=0.08, max_stroke_width=0.004)
-    return _inline_classes(backend.get_string(page, settings=settings))
+    box = BoundingBox2d([(0, 0), (width_mm * scale, height_mm * scale)])
+    return _inline_classes(backend.get_string(page, settings=settings, render_box=box))
 
 
 _STYLE = re.compile(r"<style>\.(C[0-9A-Za-z]+) \{([^}]*)\}</style>")
