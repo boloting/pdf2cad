@@ -1,0 +1,28 @@
+[project]
+name = "pdf2cad"
+version = "0.1.0"
+description = "Convert vector PDF drawings to DXF with dimensions, blocks, hatches and text rebuilt as CAD objects"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ezdxf>=1.4.5",
+    "fastapi>=0.165.0",
+    "pillow>=13.0.0",
+    "pymupdf>=2.1",
+    "python-multipart>=0.0.34",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+pdf2cad = "pdf2cad.cli:main"
+pdf2cad-web = "pdf2cad.web:main"
+
+[build-system]
+requires = ["uv_build>=0.13.10,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.2.0",
+]

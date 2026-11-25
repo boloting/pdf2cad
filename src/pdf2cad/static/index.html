@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF2CAD · 矢量 PDF 图纸转 DXF</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 23 L16 9 L24 23 Z' fill='none' stroke='white' stroke-width='2.4' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='18' r='2.6' fill='white'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="7" /><path d="M8 23 L16 9 L24 23 Z" /><circle cx="16" cy="18" r="2.6" /></svg>
+      </span>
+      <div>
+        <div class="brand-name">PDF2CAD</div>
+        <div class="brand-sub">矢量 PDF 图纸转可编辑 DXF</div>
+      </div>
+    </div>
+    <div class="topbar-note">文件只在本次会话中处理，30 分钟后自动清除</div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel">
+      <section class="card">
+        <h2 class="card-title">1. 选择图纸</h2>
+        <label id="dropzone" class="dropzone" tabindex="0">
+          <input id="file-input" type="file" accept="application/pdf,.pdf" hidden />
+          <svg class="dz-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" /></svg>
+          <span class="dz-title">拖入 PDF，或点击选择</span>
+          <span class="dz-hint">需要矢量 PDF（由 CAD 导出或打印），扫描件无法识别</span>
+        </label>
+        <div id="file-chip" class="file-chip" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z M14 3v5h5" /></svg>
+          <div class="file-meta">
+            <div id="file-name" class="file-name"></div>
+            <div id="file-size" class="file-size"></div>
+          </div>
+          <button id="file-clear" class="icon-btn" type="button" aria-label="移除文件">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+        </div>
+        <button id="sample-btn" class="link-btn" type="button">没有图纸？用示例图纸试一试</button>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">2. 转换选项</h2>
+        <div class="field" id="page-field" hidden>
+          <label for="page-select">页码</label>
+          <select id="page-select"></select>
+        </div>
+        <fieldset class="field">
+          <legend>比例</legend>
+          <label class="radio"><input type="radio" name="scale-mode" value="auto" checked /> 自动（按标注数值推算）</label>
+          <label class="radio scale-manual">
+            <input type="radio" name="scale-mode" value="manual" /> 手动 1 :
+            <input id="scale-input" type="number" min="0.0001" step="any" placeholder="100" inputmode="decimal" />
+          </label>
+        </fieldset>
+        <fieldset class="field">
+          <legend>还原为 CAD 对象</legend>
+          <label class="switch"><input id="opt-dims" type="checkbox" checked /><span></span> 标注与引线</label>
+          <label class="switch"><input id="opt-hatch" type="checkbox" checked /><span></span> 填充（实心与剖面线）</label>
+          <label class="switch"><input id="opt-blocks" type="checkbox" checked /><span></span> 图块（重复图形）</label>
+          <p class="field-hint">直线、圆、圆弧、多段线、文字、图层和线型始终保留。</p>
+        </fieldset>
+        <button id="convert-btn" class="primary-btn" type="button" disabled>转换为 DXF</button>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div id="state-empty" class="state">
+        <div class="empty">
+          <h1>把 PDF 图纸还原成真正的 CAD 对象</h1>
+          <p class="lead">不是打散的线条。程序会识别 PDF 里的笔画，重建成 AutoCAD、中望、浩辰都能直接编辑的对象。</p>
+          <div class="features">
+            <div class="feature"><span class="tag t-dim">DIMENSION</span><h3>标注</h3><p>尺寸线、界线、箭头和数字合成线性、半径、直径标注，数值与几何关联。</p></div>
+            <div class="feature"><span class="tag t-block">BLOCK</span><h3>图块</h3><p>重复出现的图形（螺栓孔、门窗、符号）收成图块定义和插入，支持旋转。</p></div>
+            <div class="feature"><span class="tag t-hatch">HATCH</span><h3>填充</h3><p>实心填充与等距剖面线还原成 HATCH，自动寻找边界，ANSI31/37 直接命名。</p></div>
+            <div class="feature"><span class="tag t-text">TEXT</span><h3>文字</h3><p>保留字符串、字高、角度和图层，中文正常，Φ、±、° 转成 CAD 控制码。</p></div>
+          </div>
+          <p class="footnote">也会还原：四段贝塞尔组成的圆和圆弧、PDF 图层、虚线和点划线线型、线宽、颜色，并从标注自动推算比例。</p>
+        </div>
+      </div>
+
+      <div id="state-loading" class="state" hidden>
+        <div class="loading">
+          <div class="spinner" aria-hidden="true"></div>
+          <div class="loading-title">正在识别图纸…</div>
+          <div class="loading-sub">提取路径和文字，重建标注、填充和图块</div>
+        </div>
+      </div>
+
+      <div id="state-error" class="state" hidden>
+        <div class="error-box" role="alert">
+          <div class="error-title">转换失败</div>
+          <div id="error-msg" class="error-msg"></div>
+          <button id="retry-btn" class="secondary-btn" type="button">重试</button>
+        </div>
+      </div>
+
+      <div id="state-result" class="state result" hidden>
+        <div class="result-head">
+          <div class="result-title">
+            <div id="result-name" class="result-name"></div>
+            <div class="badges">
+              <span id="badge-scale" class="badge"></span>
+              <span id="badge-layers" class="badge"></span>
+              <span id="badge-size" class="badge"></span>
+            </div>
+          </div>
+          <a id="download-btn" class="primary-btn download" href="#" download>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0 4-4m-4 4-4-4M5 20h14" /></svg>
+            下载 DXF
+          </a>
+        </div>
+
+        <div id="stats" class="stats"></div>
+        <ul id="warnings" class="warnings"></ul>
+
+        <div class="viewer-card">
+          <div class="viewer-bar">
+            <div class="tabs" role="tablist">
+              <button class="tab active" role="tab" data-view="highlight" aria-selected="true">识别着色</button>
+              <button class="tab" role="tab" data-view="preview" aria-selected="false">DXF 预览</button>
+              <button class="tab" role="tab" data-view="source" aria-selected="false">原始 PDF</button>
+            </div>
+            <div class="zoom">
+              <button class="icon-btn" id="zoom-out" type="button" aria-label="缩小"><svg viewBox="0 0 24 24"><path d="M6 12h12" /></svg></button>
+              <button class="zoom-label" id="zoom-fit" type="button" title="适应窗口">100%</button>
+              <button class="icon-btn" id="zoom-in" type="button" aria-label="放大"><svg viewBox="0 0 24 24"><path d="M12 6v12M6 12h12" /></svg></button>
+            </div>
+          </div>
+          <div id="legend" class="legend">
+            <span><i class="sw t-dim"></i>标注 / 引线</span>
+            <span><i class="sw t-block"></i>图块</span>
+            <span><i class="sw t-hatch"></i>填充</span>
+            <span><i class="sw t-text"></i>文字</span>
+            <span><i class="sw t-plain"></i>线 / 圆 / 圆弧 / 多段线</span>
+          </div>
+          <div id="viewer" class="viewer">
+            <img id="viewer-img" alt="图纸预览" draggable="false" />
+          </div>
+          <div class="viewer-hint">滚轮缩放，拖动平移，双击适应窗口</div>
+        </div>
+
+        <details class="details">
+          <summary>DXF 图层与实体明细</summary>
+          <div class="details-grid">
+            <div>
+              <h4>图层</h4>
+              <div id="layers" class="chips"></div>
+            </div>
+            <div>
+              <h4>模型空间实体</h4>
+              <table id="entities" class="entities"></table>
+            </div>
+          </div>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
