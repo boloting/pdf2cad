@@ -189,6 +189,31 @@ def outlined_dims_pdf(scale: float = 100 / 0.96) -> tuple[bytes, list[str], list
     return pg.save(), hx, vy
 
 
+def outlined_text_pdf(items) -> bytes:
+    """Lettering drawn only as filled glyph outlines, as when a CAD plot outlines its fonts.
+
+    items: (text, (x, y), height, rotation in degrees).
+    """
+    from ezdxf.addons import text2path
+    from ezdxf.fonts import fonts
+
+    face = fonts.FontFace(family="WenQuanYi Micro Hei")
+    pg = Page()
+    for text, (x, y), h, rot in items:
+        c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+        sh = pg.page.new_shape()
+        for path in text2path.make_paths_from_str(text, face, size=h):
+            for sub in path.sub_paths():
+                pts = [(x + p.x * c - p.y * s, y + p.x * s + p.y * c) for p in sub.flattening(0.02)]
+                if len(pts) > 2:
+                    sh.draw_polyline([pg.P(*p) for p in pts])
+        sh.finish(color=None, fill=(0, 0, 0), even_odd=True, closePath=True)
+        sh.commit()
+    pg.line((20, 20), (270, 20), width=0.5)
+    pg.line((20, 20), (20, 190), width=0.5)
+    return pg.save()
+
+
 def plan_pdf() -> bytes:
     """A 1:100 floor plan: walls, rotated door blocks, chained tick dims, aligned dim, hatches."""
     pg = Page()

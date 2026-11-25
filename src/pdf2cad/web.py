@@ -92,6 +92,7 @@ def convert(
     dimensions: str = Form("true"),
     hatches: str = Form("true"),
     blocks: str = Form("true"),
+    ocr: str = Form("true"),
 ) -> JSONResponse:
     data = file.file.read(MAX_UPLOAD + 1)
     if len(data) > MAX_UPLOAD:
@@ -125,6 +126,7 @@ def convert(
             opts = Options(
                 page=page - 1, scale=scale_v, dimensions=_flag(dimensions),
                 hatches=_flag(hatches), blocks=_flag(blocks),
+                ocr="auto" if _flag(ocr) else False,
             )
             result = convert_page(pdf, opts)
         w, h = result.report.page_size_mm

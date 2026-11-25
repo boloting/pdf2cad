@@ -25,6 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-dims", action="store_true", help="不识别标注")
     p.add_argument("--no-hatch", action="store_true", help="不识别填充")
     p.add_argument("--no-blocks", action="store_true", help="不识别图块")
+    p.add_argument("--no-ocr", action="store_true", help="不用文字识别还原转曲文字")
+    p.add_argument("--ocr", action="store_true", help="即使 PDF 里有文字对象，也对转曲文字做识别")
     p.add_argument("--text-height-factor", type=float, default=0.7, help="字高 = PDF 字号 × 该系数（默认 0.7）")
     p.add_argument("--json", action="store_true", help="以 JSON 输出识别报告")
     args = p.parse_args(argv)
@@ -45,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
             opts = Options(
                 page=i, scale=args.scale, dimensions=not args.no_dims, hatches=not args.no_hatch,
                 blocks=not args.no_blocks, text_height_factor=args.text_height_factor,
+                ocr=False if args.no_ocr else (True if args.ocr else "auto"),
             )
             try:
                 result = convert_page(doc, opts)

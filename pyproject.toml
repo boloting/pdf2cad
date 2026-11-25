@@ -10,6 +10,7 @@ dependencies = [
     "pillow>=13.0.0",
     "pymupdf>=2.1",
     "python-multipart>=0.0.34",
+    "rapidocr-onnxruntime>=1.4",
     "uvicorn[standard]>=0.54.0",
 ]
 

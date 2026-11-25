@@ -4,7 +4,7 @@ import math
 import ezdxf
 import pytest
 
-from drawings import outlined_dims_pdf, plan_pdf
+from drawings import outlined_dims_pdf, outlined_text_pdf, plan_pdf
 from pdf2cad.convert import Options, convert_bytes
 from pdf2cad.extract import bezier_to_arc
 from pdf2cad.dims import parse_value
@@ -106,6 +106,38 @@ def test_outlined_digits_chain_and_fit_to_page_scale():
     for d in msp.query("DIMENSION"):
         shown = d.dxf.text if d.dxf.text not in ("", "<>") else str(round(d.get_measurement()))
         assert shown in hx + vy
+
+
+def test_outlined_lettering_becomes_text():
+    pytest.importorskip("rapidocr_onnxruntime")
+    items = [
+        ("雨水管", (40, 160), 4, 0), ("CH=3500", (120, 160), 4, 0), ("卫生间", (40, 120), 5, 0),
+        ("FM甲1022", (120, 120), 4, 0), ("玻璃幕墙", (240, 60), 4, 90), ("±0.000", (40, 80), 4, 0),
+    ]
+    r = convert_bytes(outlined_text_pdf(items))
+    got = {t.text: t for t in r.drawing.texts}
+    hits = [text for text, *_ in items if text in got]
+    assert len(hits) >= len(items) - 1, sorted(got)
+    assert got["卫生间"].rotation == 0 and got.get("玻璃幕墙", got["卫生间"]).rotation in (0, 90)
+    if "玻璃幕墙" in got:
+        assert got["玻璃幕墙"].rotation == 90
+    t = got["卫生间"]
+    assert math.dist(t.insert, (40, 120)) < 1.5
+    assert any("文字识别" in w for w in r.report.warnings)
+    doc = reload(r)
+    msp = doc.modelspace()
+    assert len(msp.query("TEXT")) >= len(items) - 1
+    assert len(msp.query("HATCH")) == 0
+
+
+def test_ocr_cleanup_rules():
+    from pdf2cad.ocrtext import clean
+
+    assert clean("CH=至项") == "CH=至顶"
+    assert clean("FMZ1522") == "FM乙1522"
+    assert clean("1.2OOM标高") == "1.200M标高"
+    assert clean("[ICH=3500") == "CH=3500"
+    assert clean("十冏十") == ""
 
 
 def test_plan_aligned_dim(plan):

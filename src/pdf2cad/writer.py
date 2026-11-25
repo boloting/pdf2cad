@@ -16,6 +16,8 @@ from .dims import parse_value
 from .model import Arc, Bezier, Color, Drawing, Hatch, Line, Shape, Style
 
 TEXT_STYLE = "PDF_TEXT"
+REVIEW_LAYER = "PDF_文字_待核对"
+_CJK = re.compile(r"[\u3000-\u9fff\uff00-\uffef]")
 DIM_STYLE = "PDF"
 
 _ACI = {
@@ -171,8 +173,13 @@ class Writer:
 
     # -- text -----------------------------------------------------------------------
     def text(self, target, t, layer_kind: str = "text"):
-        a = self.attribs(t.layer, layer_kind, t.color)
+        layer = REVIEW_LAYER if getattr(t, "review", False) else t.layer
+        a = self.attribs(layer, layer_kind, t.color)
         a.update(style=TEXT_STYLE, insert=self.X(t.insert), rotation=t.rotation)
+        if t.font == "ocr" and t.width > 0 and t.text:
+            # Width of the lettering in the PDF over its natural width in the CAD font.
+            natural = t.height * sum(1.15 if _CJK.match(ch) else 0.6 for ch in t.text)
+            a["width"] = round(min(2.0, max(0.4, t.width / natural)), 3)
         self.counts["TEXT"] += 1
         return target.add_text(t.text, height=t.height * self.s, dxfattribs=a)
 

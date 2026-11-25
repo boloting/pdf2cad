@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import math
+from typing import Callable
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from statistics import median
@@ -11,7 +12,7 @@ from statistics import median
 import pymupdf
 from ezdxf.document import Drawing as DXFDocument
 
-from . import blocks, dims, hatch
+from . import blocks, dims, hatch, ocrtext
 from .dims import parse_value
 from .extract import extract_page
 from .geom import dot, line_angle
@@ -29,6 +30,10 @@ class Options:
     text_height_factor: float = 0.7
     max_arrow_size: float = 8.0
     min_hatch_lines: int = 4
+    # Read outlined/stroked lettering with OCR: True, False, or "auto" (when the page
+    # has almost no real text and the OCR extra is installed).
+    ocr: bool | str = "auto"
+    progress: Callable[[float], None] | None = None
 
 
 @dataclass
@@ -164,12 +169,22 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
     if not d.shapes and not d.texts:
         warnings.append("这一页没有矢量路径或文字对象，可能是扫描件或图片，无法转换。")
     if d.shapes and not d.texts:
-        warnings.append("页面里没有文字对象。如果图上能看到文字，说明导出时文字被转成了轮廓，只能作为图形保留。")
+        if opts.ocr is False or not ocrtext.available():
+            warnings.append("页面里没有文字对象。如果图上能看到文字，说明导出时文字被转成了轮廓，只能作为图形保留。")
+        else:
+            warnings.append("页面里没有文字对象，图上的文字是转曲的轮廓或笔画，已尝试用文字识别还原。")
     if page.get_images():
         warnings.append("页面含有位图图片，图片内容不会被转换。")
 
     if opts.dimensions:
         dims.recognize(d, consumed, used_texts, opts.max_arrow_size)
+    ocr_counts = None
+    want_ocr = opts.ocr is True or (opts.ocr == "auto" and len(d.texts) < 3 and len(d.shapes) > 0)
+    if want_ocr:
+        if ocrtext.available():
+            ocr_counts = ocrtext.recognize(d, consumed, opts.progress)
+        elif opts.ocr is True:
+            warnings.append("没有安装文字识别组件（rapidocr-onnxruntime），转曲文字未识别。")
     strips_to_lines(d, consumed)
     if opts.hatches:
         hatch.recognize_solid(d, consumed)
@@ -190,6 +205,11 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
                 f"按标注数值反推出的比例是 1:{auto:g}，不是标准比例，PDF 可能是缩放打印的（例如“适合纸张”）。"
                 "已按这个比例还原真实尺寸。"
             )
+    if ocr_counts and ocr_counts["text"]:
+        msg = f"用文字识别把 {ocr_counts['text']} 处转曲文字还原成了可编辑文字。"
+        if ocr_counts["review"]:
+            msg += f"其中 {ocr_counts['review']} 处把握不大，放在“PDF_文字_待核对”图层，请在 CAD 里核对。"
+        warnings.append(msg)
     glyph_dims = getattr(d, "glyph_dims", 0)
     if glyph_dims:
         warnings.append(f"有 {glyph_dims} 个标注的数字是转曲的笔画，已按字形自动识别并重建为标注对象。")

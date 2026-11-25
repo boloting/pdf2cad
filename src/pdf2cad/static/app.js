@@ -8,7 +8,7 @@
     drop: $("dropzone"), input: $("file-input"), chip: $("file-chip"), name: $("file-name"),
     size: $("file-size"), clear: $("file-clear"), sample: $("sample-btn"), convert: $("convert-btn"),
     pageField: $("page-field"), page: $("page-select"), scale: $("scale-input"),
-    dims: $("opt-dims"), hatch: $("opt-hatch"), blocks: $("opt-blocks"),
+    dims: $("opt-dims"), hatch: $("opt-hatch"), blocks: $("opt-blocks"), ocr: $("opt-ocr"),
     empty: $("state-empty"), loading: $("state-loading"), error: $("state-error"), result: $("state-result"),
     errorMsg: $("error-msg"), retry: $("retry-btn"),
     resultName: $("result-name"), badgeScale: $("badge-scale"), badgeLayers: $("badge-layers"), badgeSize: $("badge-size"),
@@ -96,6 +96,7 @@
     fd.append("dimensions", String(els.dims.checked));
     fd.append("hatches", String(els.hatch.checked));
     fd.append("blocks", String(els.blocks.checked));
+    fd.append("ocr", String(els.ocr.checked));
 
     els.convert.disabled = true;
     show("loading");

@@ -63,7 +63,8 @@
           <label class="switch"><input id="opt-dims" type="checkbox" checked /><span></span> 标注与引线</label>
           <label class="switch"><input id="opt-hatch" type="checkbox" checked /><span></span> 填充（实心与剖面线）</label>
           <label class="switch"><input id="opt-blocks" type="checkbox" checked /><span></span> 图块（重复图形）</label>
-          <p class="field-hint">直线、圆、圆弧、多段线、文字、图层和线型始终保留。</p>
+          <label class="switch"><input id="opt-ocr" type="checkbox" checked /><span></span> 转曲文字识别</label>
+          <p class="field-hint">直线、圆、圆弧、多段线、文字、图层和线型始终保留。PDF 里没有文字对象时，会用文字识别把转曲的文字还原成可编辑文字，大图需要一两分钟。</p>
         </fieldset>
         <button id="convert-btn" class="primary-btn" type="button" disabled>转换为 DXF</button>
       </section>
@@ -88,7 +89,7 @@
         <div class="loading">
           <div class="spinner" aria-hidden="true"></div>
           <div class="loading-title">正在识别图纸…</div>
-          <div class="loading-sub">提取路径和文字，重建标注、填充和图块</div>
+          <div class="loading-sub">提取路径和文字，重建标注、填充和图块。转曲文字较多的大图需要一两分钟。</div>
         </div>
       </div>
 
