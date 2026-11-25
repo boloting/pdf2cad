@@ -15,7 +15,7 @@ from . import blocks, dims, hatch
 from .dims import parse_value
 from .extract import extract_page
 from .geom import dot, line_angle
-from .model import COMMON_SCALES, Drawing, Shape
+from .model import COMMON_SCALES, Drawing, Line, Shape, Style
 from .writer import Writer
 
 
@@ -93,6 +93,41 @@ def dedupe_lines(d: Drawing, consumed: set[int]) -> int:
     return removed
 
 
+def strips_to_lines(d: Drawing, consumed: set[int]) -> int:
+    """Turn long thin filled rectangles (heavy lines exported as outlines) back into lines."""
+    n = 0
+    for s in d.shapes:
+        if s.id in consumed or s.fill is None or not s.closed:
+            continue
+        if not 4 <= len(s.segs) <= 5 or not all(isinstance(g, Line) for g in s.segs):
+            continue
+        pts: list = []
+        for g in s.segs:
+            p = g.start()
+            if not pts or math.dist(pts[-1], p) > 1e-3:
+                pts.append(p)
+        if len(pts) == 5 and math.dist(pts[0], pts[-1]) <= 1e-3:
+            pts.pop()
+        if len(pts) != 4:
+            continue
+        sides = [math.dist(pts[i], pts[(i + 1) % 4]) for i in range(4)]
+        if abs(sides[0] - sides[2]) > 0.02 or abs(sides[1] - sides[3]) > 0.02:
+            continue
+        k = 0 if sides[0] < sides[1] else 1
+        w, length = sides[k], sides[k + 1]
+        if w <= 0 or w > 0.8 or length < 3.0 or length / w < 12:
+            continue
+        a = ((pts[k][0] + pts[k + 1][0]) / 2, (pts[k][1] + pts[k + 1][1]) / 2)
+        b = ((pts[k + 2][0] + pts[(k + 3) % 4][0]) / 2, (pts[k + 2][1] + pts[(k + 3) % 4][1]) / 2)
+        s.segs = [Line(a, b)]
+        s.closed = False
+        s.style = Style(s.style.layer, s.fill, round(w, 2), s.style.dashes)
+        s.fill = None
+        s.stroke = True
+        n += 1
+    return n
+
+
 def detect_scale(d: Drawing) -> float | None:
     ratios = []
     for dim in d.linear_dims:
@@ -135,6 +170,7 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
 
     if opts.dimensions:
         dims.recognize(d, consumed, used_texts, opts.max_arrow_size)
+    strips_to_lines(d, consumed)
     if opts.hatches:
         hatch.recognize_solid(d, consumed)
         hatch.recognize_pattern(d, consumed, opts.min_hatch_lines)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from statistics import median
 
 from .geom import (
     Vec, angle_diff, bbox, convex_hull, distance_to_polygon, dot, line_angle, point_in_polygon,
@@ -12,6 +13,7 @@ from .geom import (
 from .model import Arc, Drawing, Hatch, HatchFamily, Line, Seg, Shape
 
 ON_TOL = 0.12
+TINY_FILL = 1.0
 
 
 def _is_white(c) -> bool:
@@ -34,6 +36,7 @@ def recognize_solid(d: Drawing, consumed: set[int]) -> None:
         if s.id in consumed or s.fill is None:
             continue
         by_path[s.path_id].append(s)
+    tiny: dict[tuple, Hatch] = {}
     for _pid, group in by_path.items():
         fill = group[0].fill
         if _is_white(fill):
@@ -44,7 +47,16 @@ def recognize_solid(d: Drawing, consumed: set[int]) -> None:
                 else:
                     consumed.add(s.id)
             continue
-        d.hatches.append(Hatch(loops=[s.segs for s in group], solid=True, color=fill, layer=group[0].style.layer))
+        b = bbox([p for s in group for p in s.points()])
+        if max(b[2] - b[0], b[3] - b[1]) < TINY_FILL:
+            # Dots of a stipple pattern, glyph slivers: one HATCH per area instead of thousands.
+            key = (fill, group[0].style.layer, int(b[0] // 50), int(b[1] // 50))
+            if key not in tiny:
+                tiny[key] = Hatch(loops=[], solid=True, color=fill, layer=group[0].style.layer)
+                d.hatches.append(tiny[key])
+            tiny[key].loops.extend(s.segs for s in group)
+        else:
+            d.hatches.append(Hatch(loops=[s.segs for s in group], solid=True, color=fill, layer=group[0].style.layer))
         for s in group:
             if s.stroke:
                 s.fill = None
@@ -85,7 +97,10 @@ def _families(lines: list[Shape], min_lines: int) -> list[list[Shape]]:
         if count >= min_lines and s >= 0.3:
             lo, hi = uniq[i] - 0.01, uniq[j + 1] + 0.01
             fam = [x for x in items if lo <= off(x) <= hi]
-            out.extend(_split_spatial(fam, u, s))
+            # Short pieces that merely line up (curved symbols repeated side by side) are
+            # not a hatch: real hatch lines run well past their spacing.
+            if median(x.segs[0].length for x in fam) >= 1.5 * s:  # type: ignore[union-attr]
+                out.extend(_split_spatial(fam, u, s))
         i = j + 1
     return [f for f in out if len({round(off(x), 2) for x in f}) >= min_lines]
 
