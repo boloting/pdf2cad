@@ -15,6 +15,11 @@ from .geom import Vec, add, bezier_point, dist, mul, rotate
 Color = tuple[float, float, float]
 Transform = Callable[[Vec], Vec]
 
+COMMON_SCALES = [
+    1, 1.5, 2, 2.5, 3, 4, 5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 125, 150, 200, 250, 300,
+    400, 500, 600, 750, 1000, 1500, 2000, 2500, 5000, 10000,
+]
+
 
 @dataclass(frozen=True)
 class Style:

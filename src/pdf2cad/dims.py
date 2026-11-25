@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import math
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 
+from . import stroketext
 from .geom import (
     Vec, add, angle_diff, angle_of, cross, dist, dot, line_angle, mid, mul, point_line_distance,
     point_segment_distance, project_param, rotate, sub, unit,
 )
-from .model import Arc, Arrow, Drawing, Leader, Line, LinearDim, RadialDim, Shape, TextItem
+from .model import COMMON_SCALES, Arc, Arrow, Drawing, Leader, Line, LinearDim, RadialDim, Shape, TextItem
 from .spatial import Grid
 
 DIAMETER_MARKS = ("Ø", "Φ", "φ", "%%c", "%%C", "⌀")
@@ -134,6 +136,26 @@ def detect_arrows(shapes: list[Shape], consumed: set[int], max_size: float) -> l
     return merged
 
 
+def _stroke_axis(s: Shape) -> tuple[Vec, Vec] | None:
+    """A line, or a thin closed polygon (a thick stroke exported as an outline), as a segment."""
+    if s.is_single_line:
+        return s.segs[0].start(), s.segs[0].end()
+    if not s.closed or len(s.segs) > 6 or not all(isinstance(g, Line) for g in s.segs):
+        return None
+    b = s.bbox()
+    if max(b[2] - b[0], b[3] - b[1]) > 6.0:
+        return None
+    pts = [g.start() for g in s.segs]
+    p, q = max(((p, q) for i, p in enumerate(pts) for q in pts[i + 1:]), key=lambda pq: dist(*pq))
+    ln = dist(p, q)
+    if ln <= 0:
+        return None
+    area = abs(sum(cross(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts)))) / 2
+    if area / ln > min(0.6, 0.2 * ln):
+        return None
+    return p, q
+
+
 @dataclass
 class _Cand:
     line: Shape
@@ -179,52 +201,88 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
                 best, best_d = i, dd
         return best
 
-    def ticks_on(line: Shape, a: Vec, b: Vec) -> list[tuple[float, Shape]]:
-        out = []
+    ticks: list[tuple[Vec, float, float, Shape]] = []
+    tick_grid: Grid[int] = Grid(3.0)
+    for s in shapes:
+        if s.id in consumed:
+            continue
+        ax = _stroke_axis(s)
+        if ax is None:
+            continue
+        p, q = ax
+        ln = dist(p, q)
+        if 0.5 <= ln <= 6.0:
+            m = mid(p, q)
+            tick_grid.insert_point(m, len(ticks))
+            ticks.append((m, line_angle(p, q), ln, s))
+
+    def ticks_on(line: Shape, a: Vec, b: Vec) -> list[tuple[float, float, list[Shape]]]:
+        """Tick marks centred on the line, merged per position: (param, size, shapes)."""
+        hits = []
         la = line_angle(a, b)
-        for sid in line_grid.query((min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])), 3.0):
-            t = by_id[sid]
-            if sid == line.id or sid in consumed:
+        for i in tick_grid.query((min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])), 0.2):
+            m, ang, ln, t = ticks[i]
+            if t.id == line.id or t.id in consumed:
                 continue
-            g = t.segs[0]
-            ln = g.length  # type: ignore[union-attr]
-            if not (0.5 <= ln <= 6.0):
+            if abs(angle_diff(ang, la) - 45) > 12:
                 continue
-            if abs(angle_diff(line_angle(g.a, g.b), la) - 45) > 12:  # type: ignore[union-attr]
-                continue
-            m = mid(g.a, g.b)  # type: ignore[union-attr]
-            if point_line_distance(m, a, b) < 0.1:
+            if point_line_distance(m, a, b) < 0.15:
                 p = project_param(m, a, b)
                 if -0.01 <= p <= 1.01:
-                    out.append((p, t))
-        out.sort(key=lambda x: x[0])
-        return out
+                    hits.append((p, ln, t))
+        hits.sort(key=lambda x: x[0])
+        merged: list[tuple[float, float, list[Shape]]] = []
+        total = dist(a, b)
+        for p, ln, t in hits:
+            if merged and (p - merged[-1][0]) * total < 0.3:
+                p0, l0, ts = merged[-1]
+                merged[-1] = (p0, max(l0, ln), ts + [t])
+            else:
+                merged.append((p, ln, [t]))
+        return merged
 
     # 1. Candidate dimension lines: a straight line with an arrowhead or tick at each end.
+    # A row of chained dimensions is often a single line with a tick at every station.
     cands: list[_Cand] = []
-    tick_used: set[int] = set()
+    pairs_on_line: dict[int, int] = {}
+    seen_spans: set[tuple] = set()
     for s in lines:
         g = s.segs[0]
         a, b = g.start(), g.end()
         ln = dist(a, b)
-        if ln < 1.0:
+        if ln < 0.8:
             continue
         u = unit(sub(b, a))
         ia, ib = arrow_at(a, u), arrow_at(b, u)
         if ia is not None and ib is not None and ia != ib:
             cands.append(_Cand(s, a, b, (arrows[ia], arrows[ib]), 0.0))
+            pairs_on_line[s.id] = 1
             continue
-        tk = [t for t in ticks_on(s, a, b) if t[1].id not in tick_used]
-        if len(tk) >= 2:
-            (p0, t0), (p1, t1) = tk[0], tk[-1]
+        tk = ticks_on(s, a, b)
+        if len(tk) < 2:
+            continue
+        n_pairs = 0
+        for k in range(len(tk) - 1):
+            (p0, l0, t0), (p1, l1, t1) = tk[k], tk[k + 1]
             pa = add(a, mul(sub(b, a), p0))
             pb = add(a, mul(sub(b, a), p1))
-            if dist(pa, pb) < 1.0:
+            if dist(pa, pb) < 0.8:
                 continue
-            size = t0.segs[0].length / math.sqrt(2)  # type: ignore[union-attr]
-            arr = (Arrow(pa, mul(u, -1), size, "tick", t0), Arrow(pb, u, size, "tick", t1))
-            cands.append(_Cand(s, pa, pb, arr, dist(a, pa)))
-            tick_used.update((t0.id, t1.id))
+            key = tuple(sorted(((round(pa[0], 1), round(pa[1], 1)), (round(pb[0], 1), round(pb[1], 1)))))
+            if key in seen_spans:
+                continue
+            seen_spans.add(key)
+            a0 = Arrow(pa, mul(u, -1), l0 / math.sqrt(2), "tick", t0[0])
+            a1 = Arrow(pb, u, l1 / math.sqrt(2), "tick", t1[0])
+            a0.extra_shapes = t0[1:]  # type: ignore[attr-defined]
+            a1.extra_shapes = t1[1:]  # type: ignore[attr-defined]
+            dle = 0.0
+            if len(tk) == 2:
+                dle = min(dist(a, pa), dist(b, pb), 3 * max(a0.size, a1.size))
+            cands.append(_Cand(s, pa, pb, (a0, a1), dle))
+            n_pairs += 1
+        if n_pairs:
+            pairs_on_line[s.id] = len(tk) - 1
 
     # 2. Assign texts to candidate lines, nearest pairs first.
     pairs: list[tuple[float, int, int]] = []
@@ -290,11 +348,9 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
                 best = (far_d, far, exe, e)
         return None if best is None else (best[1], best[2], best[3])
 
-    for ci, c in enumerate(cands):
-        tid = assigned.get(ci)
-        if tid is None:
-            continue
-        t = texts[tid]
+    emitted: dict[int, int] = defaultdict(int)
+
+    def emit(c: _Cand, text: str, text_pos: Vec, text_height: float, text_rotation: float) -> None:
         a, b = c.a, c.b
         ang = angle_of(sub(b, a))
         if ang >= 180 - 1e-6:
@@ -311,23 +367,89 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
             if e:
                 consumed.add(e[2].id)
         dim = LinearDim(
-            p1=p1, p2=p2, base=a, angle=round(ang, 6), text=t.text, text_pos=text_anchor(t),
-            text_height=t.height, text_rotation=t.rotation, arrow_size=(ends[0].size + ends[1].size) / 2,
-            arrow_kind=ends[0].kind, exe=exe, measured=dist(a, b), layer=c.line.style.layer,
+            p1=p1, p2=p2, base=a, angle=round(ang, 6), text=text, text_pos=text_pos,
+            text_height=text_height, text_rotation=text_rotation,
+            arrow_size=(ends[0].size + ends[1].size) / 2,
+            arrow_kind=ends[0].kind, exe=exe, measured=abs(dot(sub(p2, p1), unit(sub(b, a)))),
+            layer=c.line.style.layer,
             color=c.line.style.color,
         )
         dim.ext1 = e1 is not None  # type: ignore[attr-defined]
         dim.ext2 = e2 is not None  # type: ignore[attr-defined]
         dim.dle = c.dle  # type: ignore[attr-defined]
         d.linear_dims.append(dim)
-        consumed.add(c.line.id)
+        emitted[c.line.id] += 1
         for arr in ends:
             for sh in _arrow_shapes(arr):
                 consumed.add(sh.id)
             for i, x in enumerate(arrows):
                 if x is arr:
                     used_arrows.add(i)
-        used_texts.add(tid)
+
+    for ci, c in enumerate(cands):
+        tid = assigned.get(ci)
+        if tid is not None:
+            t = texts[tid]
+            emit(c, t.text, text_anchor(t), t.height, t.rotation)
+            used_texts.add(tid)
+
+    # 4. Dimensions whose numbers are outlines/strokes rather than text objects.
+    grid, pool = stroketext.glyph_pool(shapes, consumed)
+    taken: set[int] = set()
+    found: list[tuple[float, int, stroketext.Run]] = []
+    pending = [ci for ci in range(len(cands)) if ci not in assigned]
+
+    def frame(c: _Cand) -> tuple[Vec, Vec, Vec, Vec]:
+        a, b = c.a, c.b
+        u = unit(sub(b, a))
+        if u[0] < -1e-9 or (abs(u[0]) <= 1e-9 and u[1] < 0):
+            a, b, u = b, a, mul(u, -1)
+        return a, b, u, (-u[1], u[0])
+
+    for _round in range(2):
+        scored = []
+        for ci in pending:
+            a, b, u, n = frame(cands[ci])
+            r = stroketext.find_run(grid, pool, taken, a, b, u, n, dist(a, b))
+            if r:
+                scored.append((r[0], ci, r[1]))
+        scored.sort(key=lambda x: x[0])
+        left = []
+        for score, ci, run in scored:
+            ids = {g.id for g in run.glyphs}
+            if ids & taken:
+                left.append(ci)
+                continue
+            taken |= ids
+            found.append((score, ci, run))
+        pending = left
+
+    if found:
+        classes = stroketext.GlyphClasses()
+        samples = []
+        for _s, ci, run in found:
+            cls = [classes.classify(desc) for desc in run.descriptors]
+            run.classes = cls  # type: ignore[attr-defined]
+            samples.append((dist(cands[ci].a, cands[ci].b), cls))
+        learned = stroketext.learn(samples, COMMON_SCALES)
+        if learned:
+            scale, table = learned
+            d.glyph_dims = 0  # type: ignore[attr-defined]
+            for _s, ci, run in found:
+                chars = [table.get(cl) for cl in run.classes]  # type: ignore[attr-defined]
+                if None in chars:
+                    continue
+                text = "".join(chars)  # type: ignore[arg-type]
+                measured = dist(cands[ci].a, cands[ci].b) * scale
+                if abs(float(text) - measured) > max(1.0, measured * 0.02):
+                    continue
+                emit(cands[ci], text, run.center(), run.height, angle_of(run.u))
+                consumed.update(g.id for g in run.glyphs)
+                d.glyph_dims += 1  # type: ignore[attr-defined]
+
+    for line_id, n in emitted.items():
+        if n >= pairs_on_line.get(line_id, 1):
+            consumed.add(line_id)
 
     _radial_and_leaders(d, arrows, used_arrows, consumed, used_texts, by_id, text_grid, texts)
 

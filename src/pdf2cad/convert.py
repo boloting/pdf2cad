@@ -15,13 +15,8 @@ from . import blocks, dims, hatch
 from .dims import parse_value
 from .extract import extract_page
 from .geom import dot, line_angle
-from .model import Drawing, Shape
+from .model import COMMON_SCALES, Drawing, Shape
 from .writer import Writer
-
-COMMON_SCALES = [
-    1, 1.5, 2, 2.5, 3, 4, 5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 125, 150, 200, 250, 300,
-    400, 500, 600, 750, 1000, 1500, 2000, 2500, 5000, 10000,
-]
 
 
 @dataclass
@@ -119,7 +114,7 @@ def detect_scale(d: Drawing) -> float | None:
         for v in (c, 1 / c):
             if abs(m / v - 1) < 0.01:
                 return float(v)
-    return float(f"{m:.4g}")
+    return float(f"{m:.6g}")
 
 
 def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
@@ -154,6 +149,14 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
         scale, source = (auto, "dimensions") if auto else (1.0, "default")
         if auto is None and d.linear_dims:
             warnings.append("标注数值和图上长度对不上同一个比例，已按 1:1（图纸毫米）输出，可手动指定比例。")
+        if auto and auto >= 1 and not any(abs(auto / c - 1) < 1e-6 for c in COMMON_SCALES):
+            warnings.append(
+                f"按标注数值反推出的比例是 1:{auto:g}，不是标准比例，PDF 可能是缩放打印的（例如“适合纸张”）。"
+                "已按这个比例还原真实尺寸。"
+            )
+    glyph_dims = getattr(d, "glyph_dims", 0)
+    if glyph_dims:
+        warnings.append(f"有 {glyph_dims} 个标注的数字是转曲的笔画，已按字形自动识别并重建为标注对象。")
 
     if not d.has_pdf_layers:
         warnings.append("PDF 没有图层信息，已按颜色和线宽分层，标注、文字、填充各自单独成层。")

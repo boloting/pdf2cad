@@ -214,7 +214,7 @@ class Writer:
         if pv is None:
             return text, override
         value, dec, start, end = pv
-        if abs(value - measured_model) <= max(0.5 * 10 ** -dec, value * 0.002) + 1e-9:
+        if abs(value - measured_model) <= 0.5 * 10 ** -dec + 1e-9:
             override["dimdec"] = dec
             override["dimzin"] = 0 if dec else 8
             return text[:start] + "<>" + text[end:], override

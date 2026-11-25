@@ -4,7 +4,7 @@ import math
 import ezdxf
 import pytest
 
-from drawings import plan_pdf
+from drawings import outlined_dims_pdf, plan_pdf
 from pdf2cad.convert import Options, convert_bytes
 from pdf2cad.extract import bezier_to_arc
 from pdf2cad.dims import parse_value
@@ -88,6 +88,24 @@ def test_plan_chained_tick_dims(plan):
     assert plan.report.scale == 100
     ticks = [d for d in dims if d.get_dxf_attrib("defpoint")[1] > 13000]
     assert len(ticks) == 3
+
+
+def test_outlined_digits_chain_and_fit_to_page_scale():
+    data, hx, vy = outlined_dims_pdf()
+    r = convert_bytes(data)
+    texts = sorted(d.text for d in r.drawing.linear_dims)
+    assert texts == sorted(hx + vy)
+    assert r.report.scale == pytest.approx(100 / 0.96, rel=2e-4)
+    assert r.report.recognized["线性标注"] == len(hx) + len(vy)
+    assert any("笔画" in w for w in r.report.warnings)
+    doc = reload(r)
+    msp = doc.modelspace()
+    # glyph strokes, ticks and the two row lines are all absorbed into the dimensions
+    assert len(msp.query("LWPOLYLINE")) == 0
+    assert len(msp.query("HATCH")) == 0
+    for d in msp.query("DIMENSION"):
+        shown = d.dxf.text if d.dxf.text not in ("", "<>") else str(round(d.get_measurement()))
+        assert shown in hx + vy
 
 
 def test_plan_aligned_dim(plan):

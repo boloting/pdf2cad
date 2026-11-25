@@ -122,6 +122,73 @@ def door(pg: Page, hinge, rot, r=9.0):
     pg.line(R((0, 0)), R((r, 0)), width=0.18, color=GREEN)
 
 
+# Single-stroke digits on a 0.6 x 1 cell, one polyline each, like an SHX font plotted to PDF.
+STROKE_DIGITS = {
+    "0": [(0, 0), (0.6, 0), (0.6, 1), (0, 1), (0, 0)],
+    "1": [(0.35, 0), (0.35, 1), (0.15, 0.8)],
+    "2": [(0, 1), (0.6, 1), (0.6, 0.5), (0, 0.5), (0, 0), (0.6, 0)],
+    "3": [(0, 1), (0.6, 1), (0.6, 0.5), (0.1, 0.5), (0.6, 0.5), (0.6, 0), (0, 0)],
+    "4": [(0, 1), (0, 0.5), (0.6, 0.5), (0.6, 1), (0.6, 0)],
+    "5": [(0.6, 1), (0, 1), (0, 0.5), (0.6, 0.5), (0.6, 0), (0, 0)],
+    "6": [(0.6, 1), (0, 1), (0, 0), (0.6, 0), (0.6, 0.5), (0, 0.5)],
+    "7": [(0, 1), (0.6, 1), (0.2, 0)],
+    "8": [(0, 0.5), (0, 1), (0.6, 1), (0.6, 0), (0, 0), (0, 0.5), (0.6, 0.5)],
+    "9": [(0.6, 0.5), (0, 0.5), (0, 1), (0.6, 1), (0.6, 0), (0, 0)],
+}
+
+
+def stroke_text(pg: Page, origin, s, h, u=(1.0, 0.0)):
+    """Digits as stroked polylines reading along u, glyph tops towards u rotated +90°."""
+    n = (-u[1], u[0])
+    for i, ch in enumerate(s):
+        x0 = i * 0.8 * h
+        pts = [(origin[0] + u[0] * (x0 + x * h) + n[0] * y * h, origin[1] + u[1] * (x0 + x * h) + n[1] * y * h)
+               for x, y in STROKE_DIGITS[ch]]
+        pg.poly(pts, closed=False, width=0.19)
+
+
+def filled_tick(pg: Page, p, size=2.2, w=0.25):
+    """A heavy oblique tick exported as a filled outline instead of a stroke."""
+    h, k = size / 2 / math.sqrt(2), w / 2 / math.sqrt(2)
+    pts = [(p[0] - h + k, p[1] - h - k), (p[0] + h + k, p[1] + h - k),
+           (p[0] + h - k, p[1] + h + k), (p[0] - h - k, p[1] - h + k)]
+    pg.poly(pts, width=0, fill=(0, 0, 0))
+
+
+def outlined_dims_pdf(scale: float = 100 / 0.96) -> tuple[bytes, list[str], list[str]]:
+    """Chained dims drawn as one line per row, filled ticks and stroked digits.
+
+    The default scale mimics a 1:100 drawing printed with "fit to page" at 96 %.
+    """
+    pg = Page()
+    hx = ["3600", "2400", "1500", "3000", "1200", "4500", "900", "2700"]
+    vy = ["1800", "3300", "2100", "750", "3900", "1650"]
+    th = 2.5
+    x, y = 30.0, 170.0
+    xs = [x]
+    for v in hx:
+        xs.append(xs[-1] + int(v) / scale)
+    pg.line((xs[0] - 2, y), (xs[-1] + 2, y), width=0.15)
+    for xi in xs:
+        filled_tick(pg, (xi, y))
+        pg.line((xi, y - 6), (xi, y + 1), width=0.15)
+    for v, a, b in zip(hx, xs, xs[1:]):
+        w = (len(v) - 1) * 0.8 * th + 0.6 * th
+        stroke_text(pg, ((a + b) / 2 - w / 2, y + 0.7), v, th)
+    x = 260.0
+    ys = [30.0]
+    for v in vy:
+        ys.append(ys[-1] + int(v) / scale)
+    pg.line((x, ys[0] - 2), (x, ys[-1] + 2), width=0.15)
+    for yi in ys:
+        filled_tick(pg, (x, yi))
+        pg.line((x - 1, yi), (x + 6, yi), width=0.15)
+    for v, a, b in zip(vy, ys, ys[1:]):
+        w = (len(v) - 1) * 0.8 * th + 0.6 * th
+        stroke_text(pg, (x - 0.7, (a + b) / 2 - w / 2), v, th, u=(0.0, 1.0))
+    return pg.save(), hx, vy
+
+
 def plan_pdf() -> bytes:
     """A 1:100 floor plan: walls, rotated door blocks, chained tick dims, aligned dim, hatches."""
     pg = Page()
