@@ -148,6 +148,43 @@ def test_outlined_table_cells_read_separately():
     assert not any("0-70" in t for t in got)
 
 
+def _plus_field(x0, y0, x1, y1, step=5.0, arm=1.2):
+    """Planting marks: staggered rows of "+" drawn as loose strokes."""
+    lines = []
+    row = 0
+    y = y0 + step / 2
+    while y < y1:
+        x = x0 + step / 2 + (step / 2 if row % 2 else 0)
+        while x < x1:
+            lines += [((x - arm, y), (x + arm, y)), ((x, y - arm), (x, y + arm))]
+            x += step
+        y += step / 2
+        row += 1
+    return lines
+
+
+def test_plus_marks_become_one_hatch():
+    lines = _plus_field(60, 40, 160, 120)
+    r = convert_bytes(outlined_text_pdf([], lines), Options(ocr=False))
+    patterns = [h for h in r.drawing.hatches if not h.solid]
+    assert len(patterns) == 1, len(patterns)
+    assert len(r.drawing.inserts) == 0
+    doc = reload(r)
+    hatches = [h for h in doc.modelspace().query("HATCH") if not h.dxf.solid_fill]
+    assert len(hatches) == 1 and len(hatches[0].pattern.lines) >= 2
+    assert any(line.dash_length_items for line in hatches[0].pattern.lines)
+
+
+def test_vertical_text_over_plus_marks():
+    pytest.importorskip("rapidocr_onnxruntime")
+    lines = _plus_field(60, 40, 160, 120)
+    items = [("8400", (102, 60), 4, 90), ("43050", (125, 70), 4, 90)]
+    r = convert_bytes(outlined_text_pdf(items, lines))
+    got = [(t.text, t.rotation) for t in r.drawing.texts]
+    assert ("8400", 90) in got and ("43050", 90) in got, got
+    assert not [t for t, rot in got if rot == 0 and t.isdigit()], got
+
+
 def test_dimension_values_from_crowded_text():
     from pdf2cad.dims import _value_options
 

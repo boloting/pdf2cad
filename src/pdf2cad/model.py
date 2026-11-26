@@ -244,6 +244,8 @@ class HatchFamily:
     angle: float
     base: Vec
     spacing: float
+    shift: float = 0.0  # along the line, from one pattern line to the next
+    dashes: tuple[float, ...] = ()  # dash, -gap, ...; empty for continuous lines
 
 
 @dataclass

@@ -361,6 +361,72 @@ def _horizontal_pass(eng, frame: _Frame, claimed: set[int], progress, p0: float,
     return found, upright
 
 
+def _sideways_pieces(frame: _Frame, found: list[Found], upright: list[tuple], claimed: set[int]) -> list[Found]:
+    """Drop short numbers read across a column of glyphs set at 90° ("00" out of a vertical "8400").
+
+    Their glyphs go back to the vertical pass, which reads the whole column turned.
+    """
+    def short(f: Found) -> bool:
+        return bool(re.fullmatch(r"\d{1,2}", f.text)) and f.y1 - f.y0 > 0
+
+    loose = {s.id for f in found if short(f) for s in f.shapes}
+    dropped: set[int] = set()
+    keep: list[Found] = []
+    for f in found:
+        if not short(f):
+            keep.append(f)
+            continue
+        if any(s.id in dropped for s in f.shapes):
+            continue
+        h = f.y1 - f.y0
+        w = f.x1 - f.x0
+        lim = 1.6 * max(h, w)
+        gap = 0.3 * max(h, w)
+
+        def glyph(sid: int) -> bool:
+            # Glyphs turned 90° in one column all span the column's width.
+            b = frame.boxes[sid]
+            across = min(b[2], f.x1) - max(b[0], f.x0)
+            return (b[3] - b[1] <= lim and 0.8 * w <= b[2] - b[0] <= 1.25 * w and across >= 0.8 * w
+                    and not frame.by_id[sid].is_single_line)
+
+        own = {s.id for s in f.shapes}
+        col = set(own)
+        todo = list(col)
+        while todo:
+            b = frame.boxes[todo.pop()]
+            for o in frame.grid.query((b[0] - gap, b[1] - gap, b[2] + gap, b[3] + gap)):
+                if o in col or not glyph(o) or (o in claimed and o not in loose):
+                    continue
+                ob = frame.boxes[o]
+                if ob[0] <= b[2] + gap and ob[2] >= b[0] - gap and ob[1] <= b[3] + gap and ob[3] >= b[1] - gap:
+                    col.add(o)
+                    todo.append(o)
+        bs = [frame.boxes[i] for i in col]
+        x0, y0 = min(b[0] for b in bs), min(b[1] for b in bs)
+        x1, y1 = max(b[2] for b in bs), max(b[3] for b in bs)
+        if len(col) > len(f.shapes) and y1 - y0 > 2.0 * (x1 - x0) and y1 - y0 > 2.0 * h:
+            dropped |= col & loose
+            upright.append((x0, y0, x1, y1))
+        else:
+            keep.append(f)
+    def in_column(f: Found) -> bool:
+        a = _area((f.x0, f.y0, f.x1, f.y1))
+        inside = max((_area((max(b[0], f.x0), max(b[1], f.y0), min(b[2], f.x1), min(b[3], f.y1)))
+                      for b in upright if b[0] < f.x1 and b[2] > f.x0 and b[1] < f.y1 and b[3] > f.y0
+                      and _area(b) > 2.5 * a), default=0.0)
+        return inside >= 0.5 * a
+
+    out = []
+    for f in keep:
+        if short(f) and (any(s.id in dropped for s in f.shapes) or in_column(f)):
+            dropped |= {s.id for s in f.shapes}
+        else:
+            out.append(f)
+    claimed.difference_update(dropped)
+    return out
+
+
 def _vertical_pass(eng, frame: _Frame, boxes: list[tuple], claimed: set[int], progress, p0: float, p1: float):
     found: list[Found] = []
     merged = _merge_boxes(boxes)
@@ -379,7 +445,8 @@ def _vertical_pass(eng, frame: _Frame, boxes: list[tuple], claimed: set[int], pr
 LONE_NUMBER = re.compile(r"[-−]?\d+(?:\.\d+)?")
 
 
-def _leftover_pass(eng, frame: _Frame, found: list[Found], claimed: set[int]) -> list[Found]:
+def _leftover_pass(eng, frame: _Frame, found: list[Found], claimed: set[int],
+                   sideways: set[int] = frozenset()) -> list[Found]:
     """Lone numbers (a "0" in a table cell) that the detector skips: read glyph-height clusters directly."""
     import numpy as np
 
@@ -426,8 +493,8 @@ def _leftover_pass(eng, frame: _Frame, found: list[Found], claimed: set[int]) ->
             continue
         mset = set(members)
         near = frame.grid.query((x0 - h, y0 - h, x1 + h, y1 + h))
-        if any(o not in mset and o not in claimed and small(o) and not frame.by_id[o].is_single_line
-               for o in near):
+        if any(o not in mset and (o not in claimed or o in sideways) and small(o)
+               and not frame.by_id[o].is_single_line for o in near):
             continue  # part of a line of text the detector could not read, e.g. one set vertically
         shapes = [frame.by_id[i] for i in members]
         if any(s.is_single_line and max(frame.boxes[s.id][2] - frame.boxes[s.id][0], h) > 1.05 * h
@@ -507,14 +574,21 @@ def recognize(d: Drawing, consumed: set[int], progress: Callable[[float], None] 
     claimed: set[int] = set()
     hframe = _Frame(cands, False, d.shapes, eng)
     found, upright = _horizontal_pass(eng, hframe, claimed, progress, 0.0, 0.85)
+    found = _sideways_pieces(hframe, found, upright, claimed)
     found += _vertical_pass(eng, _Frame(cands, True, d.shapes, eng), upright, claimed, progress, 0.85, 1.0)
-    found += _leftover_pass(eng, hframe, found, claimed)
-    _vote(found)
     if found:
         # Door swings and similar loops read as "0"/"O" stand out by their size.
         mh = median(f.y1 - f.y0 for f in found)
-        found = [f for f in found
-                 if not (re.fullmatch(r"[0Oo]{1,2}", f.text) and f.y1 - f.y0 > 1.5 * mh)]
+        keep = [f for f in found
+                if not (re.fullmatch(r"[0Oo]{1,2}", f.text) and f.y1 - f.y0 > 1.5 * mh)]
+        kept = {id(f) for f in keep}
+        for f in found:
+            if id(f) not in kept:
+                claimed.difference_update(s.id for s in f.shapes)
+        found = keep
+    sideways = {s.id for f in found if f.vertical for s in f.shapes}
+    found += _leftover_pass(eng, hframe, found, claimed, sideways)
+    _vote(found)
     next_id = max((t.id for t in d.texts), default=-1) + 1
     review = 0
     for f in found:

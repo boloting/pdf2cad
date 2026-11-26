@@ -178,6 +178,9 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
 
     if opts.dimensions:
         dims.recognize(d, consumed, used_texts, opts.max_arrow_size)
+    if opts.hatches:
+        # "+" planting marks laid over lettering would otherwise be read along with it.
+        hatch.recognize_dashed(d, consumed)
     ocr_counts = None
     want_ocr = opts.ocr is True or (opts.ocr == "auto" and len(d.texts) < 3 and len(d.shapes) > 0)
     if want_ocr:

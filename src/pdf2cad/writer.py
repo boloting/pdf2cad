@@ -311,7 +311,11 @@ class Writer:
                 r = math.radians(f.angle)
                 sp = f.spacing * self.s
                 # Offset between successive pattern lines in world coordinates.
-                lines.append([f.angle, self.X(f.base), (-math.sin(r) * sp, math.cos(r) * sp), []])
+                sh = f.shift * self.s
+                off = (math.cos(r) * sh - math.sin(r) * sp, math.sin(r) * sh + math.cos(r) * sp)
+                # Float noise such as cos(90°) = 6e-17 makes viewers pair line crossings wrongly.
+                off = (round(off[0], 6), round(off[1], 6))
+                lines.append([round(f.angle, 6), self.X(f.base), off, [round(v * self.s, 6) for v in f.dashes]])
             hatch.set_pattern_fill(h.name, color=aci, angle=0.0, scale=1.0, definition=lines)
             hatch.dxf.pattern_scale = h.pattern_scale * self.s if h.name.startswith("ANSI") else 1.0
             if h.name.startswith("ANSI"):

@@ -9,6 +9,31 @@ from ezdxf.addons.drawing import Frontend, RenderContext, config, layout, svg
 from ezdxf.addons.drawing.properties import LayoutProperties
 from ezdxf.document import Drawing as DXFDocument
 from ezdxf.math import BoundingBox2d
+from ezdxf.render import hatching
+
+_ezdxf_line_segments = hatching._line_segments
+
+
+def _line_segments(vertices, distance):
+    # ezdxf orders the crossings of a pattern line by (x, y); at drawing coordinates of
+    # 1e5 float noise in x then scrambles vertical lines.  Order along the line instead.
+    if len(vertices) >= 2:
+        xs = [v.p0.x for v in vertices]
+        ys = [v.p0.y for v in vertices]
+        if max(ys) - min(ys) > max(xs) - min(xs):
+            vertices.sort(key=lambda v: (v.p0.y, v.p0.x))
+        else:
+            vertices.sort(key=lambda v: (v.p0.x, v.p0.y))
+        vertices = list(vertices)
+    return _ezdxf_line_segments(_Presorted(vertices), distance)
+
+
+class _Presorted(list):
+    def sort(self, *args, **kwargs) -> None:
+        pass
+
+
+hatching._line_segments = _line_segments
 
 # Colours for the "what was recognized" view, keyed by DXF entity type.
 HIGHLIGHT = {
