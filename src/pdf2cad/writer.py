@@ -313,6 +313,30 @@ class Writer:
             ds.dxf.dimtsz = 0.0
         return name
 
+    def finish_dimstyles(self) -> None:
+        """Drop ezdxf's sample styles and make Standard match PDF.
+
+        setup=True installs EZDXF / EZ_M_100_* styles (DIMLFAC=100, tiny text). AutoCAD
+        sometimes keeps one of those current when opening a DXF, so DIM produces a
+        measurement ~100× too large with microscopic arrows — exactly what a new
+        dimension must not look like next to the ones already on the sheet.
+        """
+        doc = self.doc
+        keep = {"Standard", *self.dim_styles.values()}
+        for ds in list(doc.dimstyles):
+            if ds.dxf.name not in keep:
+                doc.dimstyles.remove(ds.dxf.name)
+        primary = doc.dimstyles.get(DIM_STYLE)
+        std = doc.dimstyles.get("Standard")
+        if primary is not None and std is not None:
+            for key in (
+                "dimtxt", "dimasz", "dimtsz", "dimexe", "dimdle", "dimexo", "dimgap", "dimdli",
+                "dimtad", "dimtih", "dimtoh", "dimtmove", "dimscale", "dimdec", "dimzin", "dimdsep",
+                "dimclrd", "dimclre", "dimclrt", "dimtxsty", "dimlfac", "dimblk", "dimblk1", "dimblk2",
+            ):
+                if primary.dxf.hasattr(key):
+                    std.dxf.set(key, primary.dxf.get(key))
+
     def dim_text(self, text: str, measured_model: float) -> tuple[str, dict]:
         """Keep the measured value live ('<>') when the PDF text agrees with the geometry."""
         text = _dxf_symbols(text)
@@ -479,6 +503,7 @@ class Writer:
         doc.header["$LWDISPLAY"] = 1
         doc.header["$LTSCALE"] = 1.0
         self.setup_dimstyle()
+        self.finish_dimstyles()
         doc.header["$DIMSCALE"] = self.s
         doc.header["$DIMSTYLE"] = DIM_STYLE
 

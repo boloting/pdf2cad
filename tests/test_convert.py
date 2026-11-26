@@ -234,6 +234,10 @@ def test_dimstyles_carry_the_sizes():
     # Paper millimetres × DIMSCALE (= drawing scale), as AutoCAD expects for new dimensions.
     assert abs(ds.dimtxt - 2.5) < 0.15 and ds.dimtsz > 0 and ds.dimscale > 50
     assert abs(doc.header["$DIMSCALE"] - ds.dimscale) < 1e-6
+    # ezdxf sample styles (DIMLFAC=100) must not remain — AutoCAD may use them for DIM.
+    assert not [s.dxf.name for s in doc.dimstyles if s.dxf.name.startswith("EZ")]
+    std = doc.dimstyles.get("Standard").dxf
+    assert std.dimscale == ds.dimscale and std.dimtsz == ds.dimtsz and std.dimlfac == 1
     st = doc.styles.get("PDF_TEXT").dxf
     assert (st.font, st.bigfont) == ("simplex.shx", "gbcbig.shx")
 
