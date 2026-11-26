@@ -56,7 +56,7 @@ PREVIEW_FONTS = ("simsun.ttc", "NotoSansCJK-Regular.ttc", "wqy-microhei.ttc", "D
 
 
 def _preview_font() -> str | None:
-    """A CJK font the renderer can find on this machine; CAD itself resolves simsun.ttc."""
+    """A CJK font the renderer can find on this machine; CAD itself resolves simplex.shx + gbcbig.shx."""
     from ezdxf.fonts import fonts
 
     for name in PREVIEW_FONTS:
@@ -71,15 +71,16 @@ def _preview_font() -> str | None:
 def dxf_svg(doc: DXFDocument, width_mm: float, height_mm: float, scale: float = 1.0, highlight: bool = False) -> str:
     """Render model space framed to the sheet: (0, 0) to the page size times the drawing scale."""
     style = doc.styles.get("PDF_TEXT")
-    original = style.dxf.font if style is not None else None
+    original = (style.dxf.font, style.dxf.get("bigfont", "")) if style is not None else None
     font = _preview_font()
     if style is not None and font:
         style.dxf.font = font
+        style.dxf.bigfont = ""
     try:
         return _render(doc, width_mm, height_mm, scale, highlight)
     finally:
         if style is not None and original:
-            style.dxf.font = original
+            style.dxf.font, style.dxf.bigfont = original
 
 
 def _render(doc: DXFDocument, width_mm: float, height_mm: float, scale: float, highlight: bool) -> str:

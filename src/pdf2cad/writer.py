@@ -25,6 +25,9 @@ _ACI = {
     (0.0, 0.0, 1.0): 5, (1.0, 0.0, 1.0): 6, (0.0, 0.0, 0.0): 7, (1.0, 1.0, 1.0): 7,
 }
 _ARROW_BLOCKS = {"closed": "", "closed_blank": "CLOSEDBLANK", "open": "OPEN", "tick": "ARCHTICK", "dot": "DOT"}
+_ARROW_NAMES = {"closed": "箭头", "closed_blank": "空心箭头", "open": "开口箭头", "tick": "斜线", "dot": "圆点"}
+# Most Chinese drawings use these SHX fonts, so CAD finds them without substituting.
+TEXT_FONT, TEXT_BIGFONT = "simplex.shx", "gbcbig.shx"
 _DIA = re.compile("[ØΦφ⌀]")
 _BAD_NAME = re.compile(r'[<>/\\":;?*|=,`]')
 
@@ -53,6 +56,48 @@ def _hex(c: Color | None) -> str:
     if c is None:
         return "000000"
     return "".join(f"{int(round(v * 255)):02X}" for v in c)
+
+
+def _advance(ch: str) -> float:
+    if _CJK.match(ch):
+        return 1.0
+    if ch in "Iil.,:;|!'":
+        return 0.45
+    return 0.95
+
+
+def _nice(v: float) -> float:
+    """v rounded to a round number when one is within 2 %, else to two significant digits.
+
+    99.2 -> 100, 282.2 -> 280, 151.4 -> 150.
+    """
+    if v <= 0:
+        return 0.0
+    top = 10 ** math.floor(math.log10(v))
+    for p in (top / 2, top / 10):
+        r = round(v / p) * p
+        if abs(r - v) <= 0.02 * v or p == top / 10:
+            return round(r, 6)
+    return v
+
+
+def _snapper(values, tol: float = 0.04):
+    """Map each measured size to the rounded median of the values within tol of it."""
+    groups: list[list[float]] = []
+    for v in sorted(v for v in values if v > 0):
+        if groups and v <= groups[-1][0] * (1 + tol):
+            groups[-1].append(v)
+        else:
+            groups.append([v])
+    table = [(g[0], g[-1], _nice(median(g))) for g in groups]
+
+    def snap(v: float) -> float:
+        for lo, hi, rep in table:
+            if lo <= v <= hi:
+                return rep
+        return _nice(v)
+
+    return snap
 
 
 def _dxf_symbols(s: str) -> str:
@@ -177,27 +222,75 @@ class Writer:
         a = self.attribs(layer, layer_kind, t.color)
         a.update(style=TEXT_STYLE, insert=self.X(t.insert), rotation=t.rotation)
         if t.font == "ocr" and t.width > 0 and t.text:
-            # Width of the lettering in the PDF over its natural width in the CAD font.
-            natural = t.height * sum(1.15 if _CJK.match(ch) else 0.6 for ch in t.text)
+            # Width of the lettering in the PDF over its natural width in the CAD font
+            # (gbcbig.shx glyphs are square; simplex.shx digits and capitals about 0.95 h wide).
+            natural = t.height * sum(_advance(ch) for ch in t.text)
             a["width"] = round(min(2.0, max(0.4, t.width / natural)), 3)
         self.counts["TEXT"] += 1
         return target.add_text(t.text, height=t.height * self.s, dxfattribs=a)
 
     # -- dimensions -----------------------------------------------------------------
     def setup_dimstyle(self) -> None:
+        """One dimension style per look in the drawing, so dimensions carry no size overrides.
+
+        Sizes measured off the PDF scatter by a few hundredths of a millimetre; values within
+        4 % of each other are one setting, rounded to two significant digits.
+        """
         d = self.d
-        th = [x.text_height for x in d.linear_dims] + [x.text_height for x in d.radial_dims] + [x.text_height for x in d.leaders]
-        az = [x.arrow_size for x in d.linear_dims] + [x.arrow_size for x in d.radial_dims] + [x.arrow_size for x in d.leaders]
-        ex = [x.exe for x in d.linear_dims if x.exe > 0]
-        kinds = Counter(x.arrow_kind for x in d.linear_dims)
-        ds = self.doc.dimstyles.new(DIM_STYLE)
+        L = self.L
+        self.snap_txt = _snapper([L(x.text_height) for x in (*d.linear_dims, *d.radial_dims, *d.leaders)])
+        self.snap_asz = _snapper([L(x.arrow_size) for x in (*d.linear_dims, *d.radial_dims, *d.leaders)])
+        self.snap_exe = _snapper([L(x.exe) for x in d.linear_dims])
+        self.snap_dle = _snapper([L(getattr(x, "dle", 0)) for x in d.linear_dims])
+        acis = Counter(color_attribs(x.color).get("color", 0) for x in (*d.linear_dims, *d.radial_dims, *d.leaders))
+        self.dim_aci = acis.most_common(1)[0][0] if acis else 0
+        self.dim_styles: dict[tuple, str] = {}
+        # Extension-line overshoot and dimension-line extension vary from dimension to dimension
+        # (CAD users stretch them); the style takes each look's most common value.
+        looks: dict[tuple, list] = defaultdict(list)
+        for x in d.linear_dims:
+            looks[self.look(x)].append(self.extents(x))
+        for look, ext in sorted(looks.items(), key=lambda kv: -len(kv[1])):
+            exe, dle = Counter(ext).most_common(1)[0][0]
+            self.dim_style(*look, exe, dle)
+        if not self.dim_styles:
+            self.dim_style(L(2.5), L(2.5), "closed", L(1.25), 0.0)
+
+    def look(self, dim) -> tuple:
+        return (self.snap_txt(self.L(dim.text_height)), self.snap_asz(self.L(dim.arrow_size)), dim.arrow_kind)
+
+    def extents(self, dim) -> tuple[float, float]:
+        dle = self.snap_dle(self.L(getattr(dim, "dle", 0)))
+        # A dimension line running a few hundredths past the tick is measurement noise.
+        if dim.arrow_kind != "tick" or dle < 0.1 * self.snap_asz(self.L(dim.arrow_size)):
+            dle = 0.0
+        return self.snap_exe(self.L(dim.exe)), dle
+
+    def style_for(self, look: tuple) -> str:
+        return next((n for k, n in self.dim_styles.items() if k[:3] == look), None) or self.dim_style(
+            *look, self.snap_exe(self.L(1.25)), 0.0)
+
+    def dim_style(self, txt: float, asz: float, kind: str, exe: float, dle: float) -> str:
+        key = (txt, asz, kind, exe, dle)
+        if key in self.dim_styles:
+            return self.dim_styles[key]
+        if not self.dim_styles:
+            name = DIM_STYLE
+        else:
+            base = f"{DIM_STYLE}_{_ARROW_NAMES.get(kind, kind)}{txt:g}_{asz:g}"
+            name, k = base, 2
+            while name in self.dim_styles.values():
+                name, k = f"{base}_{k}", k + 1
+        self.dim_styles[key] = name
+        ds = self.doc.dimstyles.new(name)
         # Sizes are written in model units with DIMSCALE 1: some CAD programs
         # (LibreCAD among them) ignore DIMSCALE when they regenerate dimensions.
-        ds.dxf.dimtxt = self.L(median(th) if th else 2.5)
-        ds.dxf.dimasz = self.L(median(az) if az else 2.5)
-        ds.dxf.dimexe = self.L(median(ex) if ex else 1.25)
+        ds.dxf.dimtxt = txt
+        ds.dxf.dimasz = asz
+        ds.dxf.dimexe = exe
+        ds.dxf.dimdle = dle if kind == "tick" else 0.0
         ds.dxf.dimexo = 0.0
-        ds.dxf.dimgap = self.L(0.6)
+        ds.dxf.dimgap = _nice(0.2 * txt)
         ds.dxf.dimtad = 1
         ds.dxf.dimtih = 0
         ds.dxf.dimtoh = 0
@@ -206,12 +299,12 @@ class Writer:
         ds.dxf.dimdec = 0
         ds.dxf.dimzin = 8
         ds.dxf.dimdsep = ord(".")
-        ds.dxf.dimclrd = 0
-        ds.dxf.dimclre = 0
-        ds.dxf.dimclrt = 0
+        ds.dxf.dimclrd = self.dim_aci
+        ds.dxf.dimclre = self.dim_aci
+        ds.dxf.dimclrt = self.dim_aci
         ds.dxf.dimtxsty = TEXT_STYLE
-        if kinds:
-            ds.set_arrows(blk=_ARROW_BLOCKS.get(kinds.most_common(1)[0][0], ""))
+        ds.set_arrows(blk=_ARROW_BLOCKS.get(kind, ""))
+        return name
 
     def dim_text(self, text: str, measured_model: float) -> tuple[str, dict]:
         """Keep the measured value live ('<>') when the PDF text agrees with the geometry."""
@@ -227,33 +320,34 @@ class Writer:
             return text[:start] + "<>" + text[end:], override
         return text, override
 
-    @staticmethod
-    def dim_colors(attribs: dict) -> dict:
+    def dim_colors(self, attribs: dict) -> dict:
         """Explicit part colours: viewers disagree on BYBLOCK under a BYLAYER parent."""
-        aci = attribs.get("color")
-        return {"dimclrd": aci, "dimclre": aci, "dimclrt": aci} if aci else {}
+        aci = attribs.get("color", 0)
+        return {} if aci == self.dim_aci else {"dimclrd": aci, "dimclre": aci, "dimclrt": aci}
 
     def linear_dims(self) -> None:
         for dim in self.d.linear_dims:
             a = self.attribs(dim.layer, "dim", dim.color)
             text, ov = self.dim_text(dim.text, dim.measured * self.s)
             ov.update(self.dim_colors(a))
-            ov.update(
-                dimtxt=self.L(dim.text_height), dimasz=self.L(dim.arrow_size),
-                dimexe=self.L(dim.exe), dimse1=0 if getattr(dim, "ext1", True) else 1,
-                dimse2=0 if getattr(dim, "ext2", True) else 1,
-            )
-            if getattr(dim, "dle", 0) > 0:
-                ov["dimdle"] = self.L(dim.dle)
-            blk = _ARROW_BLOCKS.get(dim.arrow_kind, "")
-            ov["dimblk"] = blk
+            if not getattr(dim, "ext1", True):
+                ov["dimse1"] = 1
+            if not getattr(dim, "ext2", True):
+                ov["dimse2"] = 1
+            style = self.style_for(self.look(dim))
+            exe, dle = self.extents(dim)
+            sd = self.doc.dimstyles.get(style).dxf
+            if exe != sd.dimexe:
+                ov["dimexe"] = exe
+            if dle != sd.dimdle:
+                ov["dimdle"] = dle
             text_rot = None
             if abs(((dim.text_rotation - dim.angle + 90) % 180) - 90) > 2:
                 text_rot = dim.text_rotation
             r = self.msp.add_linear_dim(
                 base=self.X(dim.base), p1=self.X(dim.p1), p2=self.X(dim.p2), angle=dim.angle,
                 location=self.X(dim.text_pos), text=text, text_rotation=text_rot,
-                dimstyle=DIM_STYLE, override=ov, dxfattribs=a,
+                dimstyle=style, override=ov, dxfattribs=a,
             )
             r.render()
             self.counts["DIMENSION"] += 1
@@ -267,15 +361,13 @@ class Writer:
             prefix = "%%c" if dim.kind == "diameter" else "R"
             if f"{prefix}<>" in text or f"{prefix.lower()}<>" in text:
                 text = text.replace(f"{prefix}<>", "<>").replace(f"{prefix.lower()}<>", "<>")
-            ov.update(
-                dimtxt=self.L(dim.text_height), dimasz=self.L(dim.arrow_size), dimtix=0, dimtofl=0,
-                dimtih=1, dimtoh=1, **self.dim_colors(a),
-            )
+            ov.update(dimtix=0, dimtofl=0, dimtih=1, dimtoh=1, **self.dim_colors(a))
+            style = self.style_for((self.snap_txt(self.L(dim.text_height)), self.snap_asz(self.L(dim.arrow_size)), "closed"))
             fn = self.msp.add_diameter_dim if dim.kind == "diameter" else self.msp.add_radius_dim
             r = fn(
                 self.X(dim.center), mpoint=self.X(dim.point), radius=dim.radius * self.s,
                 location=self.X(dim.text_pos), text=text,
-                dimstyle=DIM_STYLE, override=ov, dxfattribs=a,
+                dimstyle=style, override=ov, dxfattribs=a,
             )
             r.render()
             self.counts["DIMENSION"] += 1
@@ -283,10 +375,12 @@ class Writer:
     def leaders(self) -> None:
         for ld in self.d.leaders:
             a = self.attribs(ld.layer, "dim", ld.color)
-            self.msp.add_leader(
-                [self.X(v) for v in ld.vertices], dimstyle=DIM_STYLE,
-                override={"dimasz": self.L(ld.arrow_size), **self.dim_colors(a)}, dxfattribs=a,
-            )
+            asz = self.snap_asz(self.L(ld.arrow_size))
+            style = next((n for k, n in self.dim_styles.items() if k[1] == asz), DIM_STYLE)
+            ov = self.dim_colors(a)
+            if self.doc.dimstyles.get(style).dxf.dimasz != asz:
+                ov["dimasz"] = asz
+            self.msp.add_leader([self.X(v) for v in ld.vertices], dimstyle=style, override=ov, dxfattribs=a)
             self.counts["LEADER"] += 1
             t = getattr(ld, "text_item", None)
             if t is not None:
@@ -374,7 +468,7 @@ class Writer:
     def write(self, consumed: set[int], used_texts: set[int]) -> DXFDocument:
         d = self.d
         doc = self.doc
-        doc.styles.new(TEXT_STYLE, dxfattribs={"font": "simsun.ttc", "width": 1.0})
+        doc.styles.new(TEXT_STYLE, dxfattribs={"font": TEXT_FONT, "bigfont": TEXT_BIGFONT, "width": 1.0})
         doc.header["$LWDISPLAY"] = 1
         doc.header["$LTSCALE"] = 1.0
         doc.header["$DIMSCALE"] = 1.0

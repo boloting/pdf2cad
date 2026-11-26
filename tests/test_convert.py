@@ -223,6 +223,19 @@ def test_ocr_cleanup_rules():
     assert clean("十冏十") == ""
 
 
+def test_dimstyles_carry_the_sizes():
+    data, *_ = outlined_dims_pdf()
+    doc = reload(convert_bytes(data, Options(ocr=False)))
+    dims = list(doc.modelspace().query("DIMENSION"))
+    assert {d.dxf.dimstyle for d in dims} == {"PDF"}
+    for d in dims:
+        assert not {"dimtxt", "dimasz", "dimblk"} & set(d.override().dimstyle_attribs)
+    ds = doc.dimstyles.get("PDF").dxf
+    assert ds.dimtxt == 260 and ds.dimblk == "_ARCHTICK"
+    st = doc.styles.get("PDF_TEXT").dxf
+    assert (st.font, st.bigfont) == ("simplex.shx", "gbcbig.shx")
+
+
 def test_plan_aligned_dim(plan):
     aligned = [d for d in plan.drawing.linear_dims if abs(d.angle - 30) < 0.1]
     assert len(aligned) == 1 and aligned[0].text == "4000"
