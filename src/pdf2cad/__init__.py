@@ -3,4 +3,4 @@
 from .convert import Options, Report, Result, convert_bytes, convert_file
 
 __all__ = ["Options", "Report", "Result", "convert_bytes", "convert_file"]
-__version__ = "0.1.0"
+__version__ = "1.0.0"
