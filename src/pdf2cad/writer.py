@@ -81,6 +81,27 @@ def _nice(v: float) -> float:
     return v
 
 
+def infer_dimtad(linear_dims) -> int:
+    """DIMTAD from where PDF numbers sit relative to the dimension line.
+
+    0 = centered on the line (line breaks around the text); 1 = above/beside
+    (unbroken line under the text). Majority vote; default 1 when empty.
+    """
+    centered = offset = 0
+    for dim in linear_dims:
+        ang = math.radians(dim.angle)
+        nx, ny = -math.sin(ang), math.cos(ang)
+        off = (dim.text_pos[0] - dim.base[0]) * nx + (dim.text_pos[1] - dim.base[1]) * ny
+        h = max(float(dim.text_height), 0.5)
+        if abs(off) < 0.35 * h:
+            centered += 1
+        else:
+            offset += 1
+    if centered > offset:
+        return 0
+    return 1
+
+
 def _snapper(values, tol: float = 0.04):
     """Map each measured size to the rounded median of the values within tol of it."""
     groups: list[list[float]] = []
@@ -245,6 +266,8 @@ class Writer:
         self.snap_dle = _snapper([getattr(x, "dle", 0) for x in d.linear_dims])
         acis = Counter(color_attribs(x.color).get("color", 0) for x in (*d.linear_dims, *d.radial_dims, *d.leaders))
         self.dim_aci = acis.most_common(1)[0][0] if acis else 0
+        # Match new AutoCAD DIMs to how this PDF places numbers (on the line vs above it).
+        self.dimtad = infer_dimtad(d.linear_dims)
         self.dim_styles: dict[tuple, str] = {}
         # Extension-line overshoot and dimension-line extension vary from dimension to dimension
         # (CAD users stretch them); the style takes each look's most common value.
@@ -297,11 +320,12 @@ class Writer:
         ds.dxf.dimexo = 0.5
         ds.dxf.dimgap = _nice(0.25 * txt)
         ds.dxf.dimdli = _nice(max(7.0, 3 * txt))
-        ds.dxf.dimtad = 1
+        # From the PDF: 1 = numbers above the line, 0 = numbers on the line.
+        ds.dxf.dimtad = getattr(self, "dimtad", 1)
         ds.dxf.dimtih = 0
         ds.dxf.dimtoh = 0
-        # 0 = AutoCAD places text from DIMTAD (above). 2 would leave new DIM text on the
-        # line where you click. Existing dims still override dimtmove=2 so PDF positions keep.
+        # 0 = AutoCAD places text from DIMTAD. 2 would pin new DIM text to the click point.
+        # Existing dims still override dimtmove=2 so PDF text positions keep.
         ds.dxf.dimtmove = 0
         ds.dxf.dimupt = 0
         ds.dxf.dimdec = 0

@@ -4,7 +4,11 @@ import math
 import ezdxf
 import pytest
 
-from drawings import axis_grid_pdf, crowded_dims_pdf, outlined_dims_pdf, outlined_text_pdf, plan_pdf
+from drawings import (
+    axis_grid_pdf, centered_dims_pdf, crowded_dims_pdf, outlined_dims_pdf, outlined_text_pdf, plan_pdf,
+)
+from pdf2cad.model import LinearDim
+from pdf2cad.writer import infer_dimtad
 from pdf2cad.convert import Options, convert_bytes
 from pdf2cad.extract import bezier_to_arc
 from pdf2cad.dims import parse_value
@@ -282,11 +286,34 @@ def test_dimstyles_carry_the_sizes():
     assert doc.header["$DIMTXSTY"] == "PDF_TEXT"
     assert doc.header["$DIMSTYLE"] == "PDF"
     assert doc.header["$DIMBLK"] in ("_ARCHTICK", "ARCHTICK")
-    # Text above the dimension line for new DIMs (not centered on the line).
+    # outlined_dims_pdf puts numbers above the line → DIMTAD=1 for new DIMs.
     assert ds.dimtad == 1 and ds.dimtmove == 0
     assert doc.header["$DIMTAD"] == 1 and doc.header["$DIMTMOVE"] == 0
     st = doc.styles.get("PDF_TEXT").dxf
     assert (st.font, st.bigfont) == ("simplex.shx", "gbcbig.shx")
+
+
+def test_infer_dimtad_from_text_offset():
+    def dim(ty: float, h: float = 2.5) -> LinearDim:
+        return LinearDim(
+            p1=(0, 0), p2=(30, 0), base=(0, 10), angle=0.0, text="3000",
+            text_pos=(15, 10 + ty), text_height=h, text_rotation=0.0,
+            arrow_size=1.5, arrow_kind="tick", exe=1.0, measured=30.0,
+            layer=None, color=None,
+        )
+    assert infer_dimtad([dim(2.0), dim(1.8), dim(0.0)]) == 1
+    assert infer_dimtad([dim(0.0), dim(0.2), dim(2.0)]) == 0
+    assert infer_dimtad([]) == 1
+
+
+def test_dimstyle_follows_centered_pdf_text():
+    data, vals = centered_dims_pdf()
+    doc = reload(convert_bytes(data, Options(ocr=False)))
+    dims = list(doc.modelspace().query("DIMENSION"))
+    assert len(dims) == len(vals)
+    ds = doc.dimstyles.get("PDF").dxf
+    assert ds.dimtad == 0 and doc.header["$DIMTAD"] == 0
+    assert ds.dimtmove == 0 and doc.header["$DIMTMOVE"] == 0
 
 
 def test_plan_aligned_dim(plan):

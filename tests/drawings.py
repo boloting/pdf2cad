@@ -214,6 +214,26 @@ def crowded_dims_pdf(scale: float = 100 / 0.96) -> tuple[bytes, list[str]]:
     return pg.save(), out
 
 
+def centered_dims_pdf(scale: float = 100) -> tuple[bytes, list[str]]:
+    """Horizontal dims whose numbers sit on the dimension line (DIMTAD=0 look)."""
+    pg = Page()
+    hx = ["3600", "2400", "1500", "3000"]
+    th = 2.5
+    y_obj, y = 80.0, 100.0
+    xs = [30.0]
+    for v in hx:
+        xs.append(xs[-1] + int(v) / scale)
+    for a, b, v in zip(xs, xs[1:], hx):
+        for x in (a, b):
+            pg.line((x, y_obj + 1.0), (x, y + 2.0), width=0.18, color=BLUE)
+            pg.tick((x, y), color=BLUE)
+        pg.line((a - 1.5, y), (b + 1.5, y), width=0.18, color=BLUE)
+        w = len(v) * th * 0.55
+        # Baseline so the cap-height centre lands on the dimension line.
+        pg.text(((a + b) / 2 - w / 2, y - th / 2), v, th, color=BLUE)
+    return pg.save(), hx
+
+
 def outlined_text_pdf(items, lines=()) -> bytes:
     """Lettering drawn only as filled glyph outlines, as when a CAD plot outlines its fonts.
 
