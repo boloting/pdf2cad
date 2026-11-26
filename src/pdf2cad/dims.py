@@ -6,6 +6,7 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from statistics import median
 
 from . import stroketext
 from .geom import (
@@ -535,6 +536,7 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
             scale, table = learned
             d.glyph_scale = scale  # type: ignore[attr-defined]
             d.glyph_dims = 0  # type: ignore[attr-defined]
+            done: set[int] = set()
             for _s, ci, run in found:
                 chars = [table.get(cl) for cl in run.classes]  # type: ignore[attr-defined]
                 if None in chars:
@@ -543,6 +545,22 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
                 measured = dist(cands[ci].a, cands[ci].b) * scale
                 if abs(float(text) - measured) > max(1.0, measured * 0.02):
                     continue
+                emit(cands[ci], text, run.center(), run.height, angle_of(run.u))
+                consumed.update(g.id for g in run.glyphs)
+                done.add(ci)
+                d.glyph_dims += 1  # type: ignore[attr-defined]
+            # Chains of short dimensions whose numbers run together: pick each value out by length.
+            h_ref = median(run.height for _s, _ci, run in found)
+            rest = [ci for ci in range(len(cands)) if ci not in assigned and ci not in done]
+            rest.sort(key=lambda ci: -dist(cands[ci].a, cands[ci].b))
+            for ci in rest:
+                a, b, u, n = frame(cands[ci])
+                ln = dist(a, b)
+                hit = stroketext.read_expected(grid, pool, consumed, a, b, u, n, ln, h_ref,
+                                               classes, table, ln * scale)
+                if hit is None:
+                    continue
+                text, run = hit
                 emit(cands[ci], text, run.center(), run.height, angle_of(run.u))
                 consumed.update(g.id for g in run.glyphs)
                 d.glyph_dims += 1  # type: ignore[attr-defined]

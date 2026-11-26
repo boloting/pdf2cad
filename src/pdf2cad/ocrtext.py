@@ -259,6 +259,35 @@ def _split(found: list[Found], frame: _Frame, glyphs: list[Shape], cuts: list[fl
     return ok
 
 
+def _trim_ends(frame: _Frame, glyphs: list[Shape], bs: list[tuple], text: str):
+    """Drop arrowheads and ticks set apart at either end of a line of text: low, and spaced off."""
+    h = max(b[3] for b in bs) - min(b[1] for b in bs)
+    order = sorted(glyphs, key=lambda s: frame.boxes[s.id][0])
+    clusters: list[list[Shape]] = []
+    right = None
+    for s in order:
+        b = frame.boxes[s.id]
+        if clusters and b[0] - right <= 0.6 * h:
+            clusters[-1].append(s)
+            right = max(right, b[2])
+        else:
+            clusters.append([s])
+            right = b[2]
+
+    def low(c):
+        return all(frame.boxes[s.id][3] - frame.boxes[s.id][1] < 0.5 * h for s in c)
+
+    while len(clusters) > 1 and low(clusters[0]) and not text.startswith(("-", "−", "±", "+")):
+        clusters.pop(0)
+    while len(clusters) > 1 and low(clusters[-1]) and text[-1:].isalnum() | bool(CJK.search(text[-1:])):
+        clusters.pop()
+    kept = [s for c in clusters for s in c]
+    if len(kept) == len(glyphs):
+        return glyphs, bs
+    ids = {s.id for s in kept}
+    return kept, [b for s, b in zip(glyphs, [frame.boxes[g.id] for g in glyphs]) if s.id in ids] or bs
+
+
 def _accept(found: list[Found], frame: _Frame, text: str, score: float, box, claimed: set[int],
             split: bool = True) -> bool:
     text = clean(text)
@@ -288,6 +317,7 @@ def _accept(found: list[Found], frame: _Frame, text: str, score: float, box, cla
         bs = cb
     else:
         bs = [frame.boxes[s.id] for s in glyphs]
+    glyphs, bs = _trim_ends(frame, glyphs, bs, text)
     gx0, gy0 = min(b[0] for b in bs), min(b[1] for b in bs)
     gx1, gy1 = max(b[2] for b in bs), max(b[3] for b in bs)
     if gy1 - gy0 < 0.8:

@@ -141,6 +141,65 @@ def _grow(seed, items) -> Run | None:
     return Run([x[1] for x in row], (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), lo, hi, y0, y1, descs)
 
 
+def read_expected(grid: Grid[int], pool: dict[int, Shape], used: set[int], a: Vec, b: Vec, u: Vec, n: Vec,
+                  length: float, h: float, classes: "GlyphClasses", table: dict[int, str],
+                  expected: float) -> tuple[str, Run] | None:
+    """Find the expected value among digit glyphs beside a dimension line.
+
+    In a chain of short dimensions the numbers run into each other, so no single run of
+    glyphs belongs to one dimension.  Once the glyph table is known, the digits along the
+    line can be read and the expected number picked out next to the span it labels.
+    """
+    pad = 4 * h + 2
+    box = (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+    tol = max(1.0, expected * 0.1)
+    best = None
+    near = []
+    for sid in grid.query(box, pad):
+        if sid in used:
+            continue
+        s = pool[sid]
+        pts, lb = _local(s, a, u, n)
+        gh = lb[3] - lb[1]
+        if not 0.85 * h <= gh <= 1.15 * h:
+            continue
+        cx = (lb[0] + lb[2]) / 2
+        if cx < -0.5 * length - 4 * h or cx > 1.5 * length + 4 * h:
+            continue
+        if 0.05 <= lb[1] <= 0.8 * h + 0.3 or -1.5 * h - 1.0 <= lb[3] <= -0.05:
+            desc = (s.closed, tuple((round((p[0] - lb[0]) / gh, 4), round((p[1] - lb[1]) / gh, 4)) for p in pts))
+            near.append((lb, table.get(classes.classify(desc)), s))
+    near.sort(key=lambda x: x[0][1])
+    rows: list[list] = []
+    for item in near:
+        if rows and abs(item[0][1] - rows[-1][0][0][1]) <= 0.2 * h:
+            rows[-1].append(item)
+        else:
+            rows.append([item])
+    for row in rows:
+        row.sort(key=lambda x: x[0][0])
+        for i in range(len(row)):
+            if row[i][1] is None or (row[i][1] == "0"):
+                continue
+            for j in range(i + 1, min(len(row), i + 6) + 1):
+                if row[j - 1][1] is None or (j - 1 > i and row[j - 1][0][0] - row[j - 2][0][2] > 0.55 * h):
+                    break
+                v = float("".join(x[1] for x in row[i:j]))
+                if abs(v - expected) > tol:
+                    continue
+                x0, x1 = row[i][0][0], max(x[0][2] for x in row[i:j])
+                cx = (x0 + x1) / 2
+                if cx < -0.5 * length - 2 * h or cx > 1.5 * length + 2 * h:
+                    continue
+                key = (round(abs(v - expected) / expected, 3), abs(cx - length / 2))
+                if best is None or key < best[0]:
+                    y0 = min(x[0][1] for x in row[i:j])
+                    y1 = max(x[0][3] for x in row[i:j])
+                    run = Run([x[2] for x in row[i:j]], a, u, n, x0, x1, y0, y1)
+                    best = (key, "".join(x[1] for x in row[i:j]), run)
+    return None if best is None else (best[1], best[2])
+
+
 class GlyphClasses:
     """Clusters glyph descriptors that are the same character."""
 

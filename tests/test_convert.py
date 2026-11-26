@@ -4,7 +4,7 @@ import math
 import ezdxf
 import pytest
 
-from drawings import outlined_dims_pdf, outlined_text_pdf, plan_pdf
+from drawings import crowded_dims_pdf, outlined_dims_pdf, outlined_text_pdf, plan_pdf
 from pdf2cad.convert import Options, convert_bytes
 from pdf2cad.extract import bezier_to_arc
 from pdf2cad.dims import parse_value
@@ -106,6 +106,12 @@ def test_outlined_digits_chain_and_fit_to_page_scale():
     for d in msp.query("DIMENSION"):
         shown = d.dxf.text if d.dxf.text not in ("", "<>") else str(round(d.get_measurement()))
         assert shown in hx + vy
+
+
+def test_crowded_outlined_chain_dims():
+    data, vals = crowded_dims_pdf()
+    r = convert_bytes(data, Options(ocr=False))
+    assert sorted(d.text for d in r.drawing.linear_dims) == sorted(vals)
 
 
 def test_outlined_lettering_becomes_text():

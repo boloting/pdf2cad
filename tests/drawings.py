@@ -189,6 +189,31 @@ def outlined_dims_pdf(scale: float = 100 / 0.96) -> tuple[bytes, list[str], list
     return pg.save(), hx, vy
 
 
+def crowded_dims_pdf(scale: float = 100 / 0.96) -> tuple[bytes, list[str]]:
+    """outlined_dims_pdf plus a chain of short dims whose numbers run into each other."""
+    pg = Page()
+    th = 2.5
+    rows = [["3600", "2400", "1500", "3000", "1200"], ["1000", "200", "600", "1000", "200", "500"]]
+    out: list[str] = []
+    for r, vals in enumerate(rows):
+        y = 170.0 - 60 * r
+        xs = [30.0]
+        for v in vals:
+            xs.append(xs[-1] + int(v) / scale)
+        pg.line((xs[0] - 2, y), (xs[-1] + 2, y), width=0.15)
+        for xi in xs:
+            filled_tick(pg, (xi, y))
+            pg.line((xi, y - 6), (xi, y + 1), width=0.15)
+        end = -1e9
+        for v, a, b in zip(vals, xs, xs[1:]):
+            w = (len(v) - 1) * 0.8 * th + 0.6 * th
+            start = max((a + b) / 2 - w / 2, end + 0.2 * th)
+            stroke_text(pg, (start, y + 0.7), v, th)
+            end = start + w
+        out += vals
+    return pg.save(), out
+
+
 def outlined_text_pdf(items, lines=()) -> bytes:
     """Lettering drawn only as filled glyph outlines, as when a CAD plot outlines its fonts.
 
