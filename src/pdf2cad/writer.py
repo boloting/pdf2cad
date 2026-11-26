@@ -67,14 +67,14 @@ def _advance(ch: str) -> float:
 
 
 def _nice(v: float) -> float:
-    """v rounded to a round number when one is within 2 %, else to two significant digits.
+    """Paper-millimetre size rounded to a round number within 2 %, else two significant digits.
 
-    99.2 -> 100, 282.2 -> 280, 151.4 -> 150.
+    2.69 -> 2.7, 1.45 -> 1.5, 0.95 -> 1.0, 99.2 -> 100.
     """
     if v <= 0:
         return 0.0
     top = 10 ** math.floor(math.log10(v))
-    for p in (top / 2, top / 10):
+    for p in (top / 2, top / 5, top / 10):
         r = round(v / p) * p
         if abs(r - v) <= 0.02 * v or p == top / 10:
             return round(r, 6)
@@ -231,17 +231,18 @@ class Writer:
 
     # -- dimensions -----------------------------------------------------------------
     def setup_dimstyle(self) -> None:
-        """One dimension style per look in the drawing, so dimensions carry no size overrides.
+        """One dimension style per look; sizes are paper millimetres, scaled by DIMSCALE.
 
-        Sizes measured off the PDF scatter by a few hundredths of a millimetre; values within
-        4 % of each other are one setting, rounded to two significant digits.
+        AutoCAD multiplies style sizes by DIMSCALE when you create a new dimension. Writing
+        paper sizes (2.7, 1.5, …) with DIMSCALE = drawing scale makes new dimensions match
+        the ones already on the drawing. Values within 4 % are one setting.
         """
         d = self.d
-        L = self.L
-        self.snap_txt = _snapper([L(x.text_height) for x in (*d.linear_dims, *d.radial_dims, *d.leaders)])
-        self.snap_asz = _snapper([L(x.arrow_size) for x in (*d.linear_dims, *d.radial_dims, *d.leaders)])
-        self.snap_exe = _snapper([L(x.exe) for x in d.linear_dims])
-        self.snap_dle = _snapper([L(getattr(x, "dle", 0)) for x in d.linear_dims])
+        # Dimension geometry is measured in paper mm on the PDF.
+        self.snap_txt = _snapper([x.text_height for x in (*d.linear_dims, *d.radial_dims, *d.leaders)])
+        self.snap_asz = _snapper([x.arrow_size for x in (*d.linear_dims, *d.radial_dims, *d.leaders)])
+        self.snap_exe = _snapper([x.exe for x in d.linear_dims])
+        self.snap_dle = _snapper([getattr(x, "dle", 0) for x in d.linear_dims])
         acis = Counter(color_attribs(x.color).get("color", 0) for x in (*d.linear_dims, *d.radial_dims, *d.leaders))
         self.dim_aci = acis.most_common(1)[0][0] if acis else 0
         self.dim_styles: dict[tuple, str] = {}
@@ -254,21 +255,21 @@ class Writer:
             exe, dle = Counter(ext).most_common(1)[0][0]
             self.dim_style(*look, exe, dle)
         if not self.dim_styles:
-            self.dim_style(L(2.5), L(2.5), "closed", L(1.25), 0.0)
+            self.dim_style(2.5, 2.5, "closed", 1.25, 0.0)
 
     def look(self, dim) -> tuple:
-        return (self.snap_txt(self.L(dim.text_height)), self.snap_asz(self.L(dim.arrow_size)), dim.arrow_kind)
+        return (self.snap_txt(dim.text_height), self.snap_asz(dim.arrow_size), dim.arrow_kind)
 
     def extents(self, dim) -> tuple[float, float]:
-        dle = self.snap_dle(self.L(getattr(dim, "dle", 0)))
+        dle = self.snap_dle(getattr(dim, "dle", 0))
         # A dimension line running a few hundredths past the tick is measurement noise.
-        if dim.arrow_kind != "tick" or dle < 0.1 * self.snap_asz(self.L(dim.arrow_size)):
+        if dim.arrow_kind != "tick" or dle < 0.1 * self.snap_asz(dim.arrow_size):
             dle = 0.0
-        return self.snap_exe(self.L(dim.exe)), dle
+        return self.snap_exe(dim.exe), dle
 
     def style_for(self, look: tuple) -> str:
         return next((n for k, n in self.dim_styles.items() if k[:3] == look), None) or self.dim_style(
-            *look, self.snap_exe(self.L(1.25)), 0.0)
+            *look, self.snap_exe(1.25), 0.0)
 
     def dim_style(self, txt: float, asz: float, kind: str, exe: float, dle: float) -> str:
         key = (txt, asz, kind, exe, dle)
@@ -283,19 +284,19 @@ class Writer:
                 name, k = f"{base}_{k}", k + 1
         self.dim_styles[key] = name
         ds = self.doc.dimstyles.new(name)
-        # Sizes are written in model units with DIMSCALE 1: some CAD programs
-        # (LibreCAD among them) ignore DIMSCALE when they regenerate dimensions.
+        # Paper millimetres × DIMSCALE (= drawing scale) → model size, as AutoCAD expects.
+        ds.dxf.dimscale = self.s
         ds.dxf.dimtxt = txt
         ds.dxf.dimasz = asz
         ds.dxf.dimexe = exe
         ds.dxf.dimdle = dle if kind == "tick" else 0.0
         ds.dxf.dimexo = 0.0
         ds.dxf.dimgap = _nice(0.2 * txt)
+        ds.dxf.dimdli = _nice(max(7.0, 3 * txt))
         ds.dxf.dimtad = 1
         ds.dxf.dimtih = 0
         ds.dxf.dimtoh = 0
         ds.dxf.dimtmove = 2
-        ds.dxf.dimscale = 1.0
         ds.dxf.dimdec = 0
         ds.dxf.dimzin = 8
         ds.dxf.dimdsep = ord(".")
@@ -303,7 +304,13 @@ class Writer:
         ds.dxf.dimclre = self.dim_aci
         ds.dxf.dimclrt = self.dim_aci
         ds.dxf.dimtxsty = TEXT_STYLE
-        ds.set_arrows(blk=_ARROW_BLOCKS.get(kind, ""))
+        if kind == "tick":
+            # AutoCAD draws oblique ticks from DIMTSZ (set_arrows clears it, so set it after).
+            ds.set_arrows(blk="")
+            ds.dxf.dimtsz = asz / 2
+        else:
+            ds.set_arrows(blk=_ARROW_BLOCKS.get(kind, ""))
+            ds.dxf.dimtsz = 0.0
         return name
 
     def dim_text(self, text: str, measured_model: float) -> tuple[str, dict]:
@@ -362,7 +369,7 @@ class Writer:
             if f"{prefix}<>" in text or f"{prefix.lower()}<>" in text:
                 text = text.replace(f"{prefix}<>", "<>").replace(f"{prefix.lower()}<>", "<>")
             ov.update(dimtix=0, dimtofl=0, dimtih=1, dimtoh=1, **self.dim_colors(a))
-            style = self.style_for((self.snap_txt(self.L(dim.text_height)), self.snap_asz(self.L(dim.arrow_size)), "closed"))
+            style = self.style_for((self.snap_txt(dim.text_height), self.snap_asz(dim.arrow_size), "closed"))
             fn = self.msp.add_diameter_dim if dim.kind == "diameter" else self.msp.add_radius_dim
             r = fn(
                 self.X(dim.center), mpoint=self.X(dim.point), radius=dim.radius * self.s,
@@ -375,7 +382,7 @@ class Writer:
     def leaders(self) -> None:
         for ld in self.d.leaders:
             a = self.attribs(ld.layer, "dim", ld.color)
-            asz = self.snap_asz(self.L(ld.arrow_size))
+            asz = self.snap_asz(ld.arrow_size)
             style = next((n for k, n in self.dim_styles.items() if k[1] == asz), DIM_STYLE)
             ov = self.dim_colors(a)
             if self.doc.dimstyles.get(style).dxf.dimasz != asz:
@@ -471,8 +478,8 @@ class Writer:
         doc.styles.new(TEXT_STYLE, dxfattribs={"font": TEXT_FONT, "bigfont": TEXT_BIGFONT, "width": 1.0})
         doc.header["$LWDISPLAY"] = 1
         doc.header["$LTSCALE"] = 1.0
-        doc.header["$DIMSCALE"] = 1.0
         self.setup_dimstyle()
+        doc.header["$DIMSCALE"] = self.s
         doc.header["$DIMSTYLE"] = DIM_STYLE
 
         for b in d.blocks:

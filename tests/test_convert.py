@@ -229,9 +229,11 @@ def test_dimstyles_carry_the_sizes():
     dims = list(doc.modelspace().query("DIMENSION"))
     assert {d.dxf.dimstyle for d in dims} == {"PDF"}
     for d in dims:
-        assert not {"dimtxt", "dimasz", "dimblk"} & set(d.override().dimstyle_attribs)
+        assert not {"dimtxt", "dimasz", "dimblk", "dimtsz"} & set(d.override().dimstyle_attribs)
     ds = doc.dimstyles.get("PDF").dxf
-    assert ds.dimtxt == 260 and ds.dimblk == "_ARCHTICK"
+    # Paper millimetres × DIMSCALE (= drawing scale), as AutoCAD expects for new dimensions.
+    assert abs(ds.dimtxt - 2.5) < 0.15 and ds.dimtsz > 0 and ds.dimscale > 50
+    assert abs(doc.header["$DIMSCALE"] - ds.dimscale) < 1e-6
     st = doc.styles.get("PDF_TEXT").dxf
     assert (st.font, st.bigfont) == ("simplex.shx", "gbcbig.shx")
 
