@@ -314,12 +314,12 @@ class Writer:
         return name
 
     def finish_dimstyles(self) -> None:
-        """Drop ezdxf's sample styles and make Standard match PDF.
+        """Drop ezdxf sample styles, make Standard match PDF, and sync header dimvars.
 
-        setup=True installs EZDXF / EZ_M_100_* styles (DIMLFAC=100, tiny text). AutoCAD
-        sometimes keeps one of those current when opening a DXF, so DIM produces a
-        measurement ~100× too large with microscopic arrows — exactly what a new
-        dimension must not look like next to the ones already on the sheet.
+        setup=True leaves header variables like $DIMLFAC=100, $DIMDEC=2 and
+        $DIMTXSTY=OpenSansCondensed-Light. AutoCAD uses those for new DIM commands
+        even when $DIMSTYLE is PDF, so measurements come out 100× too large with the
+        wrong font and two decimal places.
         """
         doc = self.doc
         keep = {"Standard", *self.dim_styles.values()}
@@ -327,15 +327,32 @@ class Writer:
             if ds.dxf.name not in keep:
                 doc.dimstyles.remove(ds.dxf.name)
         primary = doc.dimstyles.get(DIM_STYLE)
+        if primary is None:
+            return
+        keys = (
+            "dimtxt", "dimasz", "dimtsz", "dimexe", "dimdle", "dimexo", "dimgap", "dimdli",
+            "dimtad", "dimtih", "dimtoh", "dimtmove", "dimscale", "dimdec", "dimzin", "dimdsep",
+            "dimclrd", "dimclre", "dimclrt", "dimtxsty", "dimlfac", "dimblk", "dimblk1", "dimblk2",
+            "dimtofl", "dimtdec",
+        )
         std = doc.dimstyles.get("Standard")
-        if primary is not None and std is not None:
-            for key in (
-                "dimtxt", "dimasz", "dimtsz", "dimexe", "dimdle", "dimexo", "dimgap", "dimdli",
-                "dimtad", "dimtih", "dimtoh", "dimtmove", "dimscale", "dimdec", "dimzin", "dimdsep",
-                "dimclrd", "dimclre", "dimclrt", "dimtxsty", "dimlfac", "dimblk", "dimblk1", "dimblk2",
-            ):
+        if std is not None:
+            for key in keys:
                 if primary.dxf.hasattr(key):
                     std.dxf.set(key, primary.dxf.get(key))
+        # Header $DIMxxx must match the current style — AutoCAD reads these for new dims.
+        for key in keys:
+            if not primary.dxf.hasattr(key):
+                continue
+            header = f"${key.upper()}"
+            try:
+                doc.header[header] = primary.dxf.get(key)
+            except Exception:
+                pass
+        doc.header["$DIMSTYLE"] = DIM_STYLE
+        # Tolerance decimals follow primary; keep them from staying at ezdxf's "2".
+        doc.header["$DIMTDEC"] = int(primary.dxf.dimdec)
+        doc.header["$DIMLFAC"] = float(primary.dxf.dimlfac or 1.0)
 
     def dim_text(self, text: str, measured_model: float) -> tuple[str, dict]:
         """Keep the measured value live ('<>') when the PDF text agrees with the geometry."""

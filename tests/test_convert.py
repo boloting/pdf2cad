@@ -276,6 +276,11 @@ def test_dimstyles_carry_the_sizes():
     assert not [s.dxf.name for s in doc.dimstyles if s.dxf.name.startswith("EZ")]
     std = doc.dimstyles.get("Standard").dxf
     assert std.dimscale == ds.dimscale and std.dimtsz == ds.dimtsz and std.dimlfac == 1
+    # Header dimvars must match PDF — AutoCAD uses $DIMLFAC / $DIMTXSTY for new DIMs.
+    assert doc.header["$DIMLFAC"] == 1
+    assert doc.header["$DIMDEC"] == 0
+    assert doc.header["$DIMTXSTY"] == "PDF_TEXT"
+    assert doc.header["$DIMSTYLE"] == "PDF"
     st = doc.styles.get("PDF_TEXT").dxf
     assert (st.font, st.bigfont) == ("simplex.shx", "gbcbig.shx")
 

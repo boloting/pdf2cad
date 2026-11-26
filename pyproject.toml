@@ -1,6 +1,6 @@
 [project]
 name = "pdf2cad"
-version = "1.3.0"
+version = "1.3.1"
 description = "Convert vector PDF drawings to DXF with dimensions, blocks, hatches and text rebuilt as CAD objects"
 readme = "README.md"
 requires-python = ">=3.12"
