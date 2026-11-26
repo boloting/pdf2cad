@@ -275,6 +275,19 @@ class Insert:
 
 
 @dataclass
+class AxisBubble:
+    center: Vec
+    radius: float
+    label: str  # "C", "12", or "1/C" for an additional axis
+    text_height: float
+    style: Style
+    # Additional-axis bubbles are split by a slash: its ends, relative to the centre,
+    # and where the two numbers sit, also relative to the centre.
+    slash: tuple[Vec, Vec] | None = None
+    part_pos: tuple[Vec, Vec] | None = None
+
+
+@dataclass
 class Drawing:
     width: float
     height: float
@@ -286,6 +299,7 @@ class Drawing:
     hatches: list[Hatch] = field(default_factory=list)
     blocks: list[BlockDef] = field(default_factory=list)
     inserts: list[Insert] = field(default_factory=list)
+    axis_bubbles: list[AxisBubble] = field(default_factory=list)
     has_pdf_layers: bool = False
 
 
@@ -295,7 +309,7 @@ def translate_rotate(offset: Vec, deg: float) -> Transform:
 
 
 __all__ = [
-    "Arc", "Arrow", "BlockDef", "Bezier", "Color", "Drawing", "Hatch", "HatchFamily", "Insert",
+    "Arc", "Arrow", "AxisBubble", "BlockDef", "Bezier", "Color", "Drawing", "Hatch", "HatchFamily", "Insert",
     "Leader", "Line", "LinearDim", "RadialDim", "Seg", "Shape", "Style", "TextItem", "mul",
     "translate_rotate",
 ]

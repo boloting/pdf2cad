@@ -405,8 +405,8 @@ def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: f
         best = None
         for sid in line_grid.query_point(p, TIP_TOL):
             e = by_id[sid]
-            if sid == c.line.id or not _style_match(e, c.line):
-                continue
+            if sid == c.line.id or not _style_match(e, c.line) or e.style.dashes:
+                continue  # a dash-dot axis is the reference, not the extension line
             g = e.segs[0]
             ea, eb = g.start(), g.end()
             if abs(angle_diff(line_angle(ea, eb), la) - 90) > 1.0:

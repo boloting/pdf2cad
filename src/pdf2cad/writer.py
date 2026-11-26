@@ -324,6 +324,52 @@ class Writer:
                 hatch.dxf.true_color = ca["true_color"]
         self.counts["HATCH"] += 1
 
+    # -- axis grid ------------------------------------------------------------------
+    def axis_bubbles(self) -> None:
+        """One block per bubble size: a circle and an editable 轴号 attribute at its centre."""
+        from ezdxf.enums import TextEntityAlignment
+
+        from .axes import BUBBLE_LAYER
+
+        made: dict[tuple, str] = {}
+
+        def q(p) -> tuple:
+            return (round(p[0] * self.s), round(p[1] * self.s))
+
+        for b in self.d.axis_bubbles:
+            r, h = round(b.radius * self.s), round(b.text_height * self.s)
+            # Bubbles of one kind measure a hair differently; the first of a kind sets the block.
+            snap = max(1, round(0.05 * r))
+            key = (round(r / snap), round(h / snap), b.style.width, b.slash is not None)
+            sl = tuple(q(p) for p in b.slash) if b.slash else None
+            pos = tuple(q(p) for p in b.part_pos) if b.part_pos else None
+            name = made.get(key)
+            if name is None:
+                base = f"轴号_附加_{2 * r}" if sl else f"轴号_{2 * r}"
+                name = base if base not in made.values() else f"{base}_{len(made) + 1}"
+                blk = self.doc.blocks.new(name)
+                ga = {"layer": "0", "color": 0, "lineweight": lineweight(b.style.width)}
+                blk.add_circle((0, 0), r, dxfattribs=ga)
+                ta = {"height": h, "style": TEXT_STYLE, "layer": "0", "color": 0}
+                if sl and pos:
+                    blk.add_line(sl[0], sl[1], dxfattribs=ga)
+                    for tag, p in (("分子", pos[0]), ("分母", pos[1])):
+                        blk.add_attdef(tag, p, dxfattribs={**ta, "prompt": tag}).set_placement(
+                            p, align=TextEntityAlignment.MIDDLE_CENTER)
+                else:
+                    blk.add_attdef("轴号", (0, 0), dxfattribs={**ta, "prompt": "轴号"}).set_placement(
+                        (0, 0), align=TextEntityAlignment.MIDDLE_CENTER)
+                made[key] = name
+            a = self.attribs(BUBBLE_LAYER, "geometry", b.style.color)
+            ref = self.msp.add_blockref(name, self.X(b.center), dxfattribs=a)
+            if sl:
+                num, den = b.label.split("/", 1)
+                ref.add_auto_attribs({"分子": num, "分母": den})
+            else:
+                ref.add_auto_attribs({"轴号": b.label})
+            self.counts["INSERT"] += 1
+        self.axis_blocks = len(made)
+
     # -- assemble -------------------------------------------------------------------
     def write(self, consumed: set[int], used_texts: set[int]) -> DXFDocument:
         d = self.d
@@ -346,6 +392,7 @@ class Writer:
             self.msp.add_blockref(ins.name, self.X(ins.insert), dxfattribs=a)
             self.counts["INSERT"] += 1
 
+        self.axis_bubbles()
         for s in d.shapes:
             if s.id not in consumed:
                 self.shape(self.msp, s)

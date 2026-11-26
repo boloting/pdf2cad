@@ -12,7 +12,7 @@ from statistics import median
 import pymupdf
 from ezdxf.document import Drawing as DXFDocument
 
-from . import blocks, dims, hatch, ocrtext
+from . import axes, blocks, dims, hatch, ocrtext
 from .dims import parse_value
 from .extract import extract_page
 from .geom import dot, line_angle
@@ -176,6 +176,9 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
     if page.get_images():
         warnings.append("页面含有位图图片，图片内容不会被转换。")
 
+    axes.polygons_to_circles(d, consumed)
+    # Before dimensions, which would take single dashes of an axis as extension lines.
+    dashed = axes.merge_dashes(d, consumed)
     if opts.dimensions:
         dims.recognize(d, consumed, used_texts, opts.max_arrow_size)
     if opts.hatches:
@@ -183,6 +186,9 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
         hatch.recognize_dashed(d, consumed)
     ocr_counts = None
     want_ocr = opts.ocr is True or (opts.ocr == "auto" and len(d.texts) < 3 and len(d.shapes) > 0)
+    # Bubble labels are read on their own before the page-wide OCR, which reads them poorly.
+    eng = ocrtext._get_engine() if want_ocr and ocrtext.available() else None
+    axis_counts = axes.recognize(d, consumed, used_texts, eng)
     if want_ocr:
         if ocrtext.available():
             ocr_counts = ocrtext.recognize(d, consumed, opts.progress)
@@ -223,6 +229,13 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
     if glyph_dims:
         warnings.append(f"有 {glyph_dims} 个标注的数字是转曲的笔画，已按字形自动识别并重建为标注对象。")
 
+    if axis_counts["bubbles"]:
+        warnings.append(
+            f"识别出 {axis_counts['bubbles']} 个轴号，已做成带“轴号”属性的图块（双击可改编号），"
+            f"连着轴号的 {axis_counts['lines']} 条轴线放在“{axes.AXIS_LAYER}”图层。"
+        )
+    if dashed:
+        warnings.append(f"把 {dashed} 条被拆成一段段短划的点划线、虚线合并成了整条线，并配上对应线型。")
     if not d.has_pdf_layers:
         warnings.append("PDF 没有图层信息，已按颜色和线宽分层，标注、文字、填充各自单独成层。")
     if dup:
@@ -240,6 +253,8 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
         "图案填充": sum(1 for h in d.hatches if not h.solid),
         "图块定义": len(d.blocks),
         "图块引用": len(d.inserts),
+        "轴号": len(d.axis_bubbles),
+        "轴线": axis_counts["lines"],
         "文字": sum(1 for t in d.texts if t.id not in used_texts) + len(d.leaders),
         "圆": w.counts.get("CIRCLE", 0) + w.block_entity_counts.get("CIRCLE", 0),
         "圆弧": w.counts.get("ARC", 0) + w.block_entity_counts.get("ARC", 0),

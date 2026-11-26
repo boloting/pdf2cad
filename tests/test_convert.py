@@ -4,7 +4,7 @@ import math
 import ezdxf
 import pytest
 
-from drawings import crowded_dims_pdf, outlined_dims_pdf, outlined_text_pdf, plan_pdf
+from drawings import axis_grid_pdf, crowded_dims_pdf, outlined_dims_pdf, outlined_text_pdf, plan_pdf
 from pdf2cad.convert import Options, convert_bytes
 from pdf2cad.extract import bezier_to_arc
 from pdf2cad.dims import parse_value
@@ -183,6 +183,23 @@ def test_vertical_text_over_plus_marks():
     got = [(t.text, t.rotation) for t in r.drawing.texts]
     assert ("8400", 90) in got and ("43050", 90) in got, got
     assert not [t for t, rot in got if rot == 0 and t.isdigit()], got
+
+
+def test_exploded_axes_and_bubbles():
+    pytest.importorskip("rapidocr_onnxruntime")
+    data, labels = axis_grid_pdf()
+    r = convert_bytes(data, Options(scale=100))
+    assert sorted(b.label for b in r.drawing.axis_bubbles) == sorted(labels)
+    doc = reload(r)
+    msp = doc.modelspace()
+    axes = [e for e in msp.query("LINE") if e.dxf.layer == "PDF_轴线" and e.dxf.linetype != "BYLAYER"]
+    assert len(axes) == 6
+    assert all(e.dxf.start.distance(e.dxf.end) > 90 * 100 for e in axes)
+    assert not [e for e in msp.query("LINE") if e.dxf.start.distance(e.dxf.end) < 700]
+    tags = {}
+    for ins in msp.query("INSERT[layer=='PDF_轴号']"):
+        tags.update({a.dxf.tag: a.dxf.text for a in ins.attribs})
+    assert tags.get("分子") == "1" and tags.get("分母") == "2"
 
 
 def test_dimension_values_from_crowded_text():

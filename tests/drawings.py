@@ -241,6 +241,70 @@ def outlined_text_pdf(items, lines=()) -> bytes:
     return pg.save()
 
 
+def _outline(pg: Page, text, center, h):
+    from ezdxf.addons import text2path
+    from ezdxf.fonts import fonts
+
+    paths = text2path.make_paths_from_str(text, fonts.FontFace(family="WenQuanYi Micro Hei"), size=h)
+    pts = [p for path in paths for p in path.flattening(0.02)]
+    cx = (min(p.x for p in pts) + max(p.x for p in pts)) / 2
+    cy = (min(p.y for p in pts) + max(p.y for p in pts)) / 2
+    sh = pg.page.new_shape()
+    for path in paths:
+        for sub in path.sub_paths():
+            ring = [(center[0] + p.x - cx, center[1] + p.y - cy) for p in sub.flattening(0.02)]
+            if len(ring) > 2:
+                sh.draw_polyline([pg.P(*p) for p in ring])
+    sh.finish(color=None, fill=(0, 0, 0), even_odd=True, closePath=True)
+    sh.commit()
+
+
+def _dash_dot(pg: Page, a, b, dash=6.0, gap=0.8, color=(1, 0, 0)):
+    """A centre line exploded into separate dash and dot strokes, as many CAD plots export it."""
+    length = math.dist(a, b)
+    u = ((b[0] - a[0]) / length, (b[1] - a[1]) / length)
+    at = lambda t: (a[0] + u[0] * t, a[1] + u[1] * t)
+    t = 0.0
+    while t + dash <= length:
+        pg.line(at(t), at(t + dash), width=0.18, color=color)
+        dot = t + dash + gap
+        if dot + 0.1 <= length:
+            pg.line(at(dot), at(dot + 0.1), width=0.18, color=color)
+        t += dash + 2 * gap + 0.1
+
+
+def axis_grid_pdf() -> tuple[bytes, list[str]]:
+    """Exploded dash-dot axes ending in polygon bubbles with outlined numbers, plus one additional axis."""
+    pg = Page()
+    r = 4.0
+
+    def bubble(c, label=None, frac=None):
+        pts = [(c[0] + r * math.cos(2 * math.pi * i / 48), c[1] + r * math.sin(2 * math.pi * i / 48)) for i in range(48)]
+        pg.poly(pts, width=0.25)
+        if frac:
+            k = r * 0.95 / math.sqrt(2)
+            pg.line((c[0] + k, c[1] + k), (c[0] - k, c[1] - k), width=0.25)
+            _outline(pg, frac[0], (c[0] - 1.5, c[1] + 1.5), 2.6)
+            _outline(pg, frac[1], (c[0] + 1.5, c[1] - 1.5), 2.6)
+        else:
+            _outline(pg, label, c, 4.0)
+
+    xs = {"1": 60.0, "2": 120.0, "3": 180.0}
+    ys = {"A": 50.0, "B": 110.0}
+    for name, x in xs.items():
+        _dash_dot(pg, (x, 40.0), (x, 160.0))
+        pg.line((x, 160.0), (x, 168.0), width=0.25)
+        bubble((x, 168.0 + r), name)
+    for name, y in ys.items():
+        _dash_dot(pg, (50.0, y), (230.0, y))
+        pg.line((50.0, y), (42.0, y), width=0.25)
+        bubble((42.0 - r, y), name)
+    _dash_dot(pg, (150.0, 40.0), (150.0, 140.0))
+    pg.line((150.0, 140.0), (150.0, 148.0), width=0.25)
+    bubble((150.0, 148.0 + r), frac=("1", "2"))
+    return pg.save(), [*xs, *ys, "1/2"]
+
+
 def plan_pdf() -> bytes:
     """A 1:100 floor plan: walls, rotated door blocks, chained tick dims, aligned dim, hatches."""
     pg = Page()

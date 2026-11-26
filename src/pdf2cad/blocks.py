@@ -85,7 +85,7 @@ def _shape_key(s: Shape) -> tuple:
         n = len(fwd)
         options = [tuple(seq[i:] + seq[:i]) for seq in (fwd, rev) for i in range(n)]
     st = s.style
-    return (st.layer, st.color, round(st.width, 2), st.dashes, s.fill, s.closed, min(options))
+    return (st.layer or "", st.color, round(st.width, 2), st.dashes, s.fill, s.closed, min(options))
 
 
 def _canonical(group: list[Shape], rot: float) -> tuple[tuple, Vec]:
