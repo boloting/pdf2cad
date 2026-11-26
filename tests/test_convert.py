@@ -282,6 +282,9 @@ def test_dimstyles_carry_the_sizes():
     assert doc.header["$DIMTXSTY"] == "PDF_TEXT"
     assert doc.header["$DIMSTYLE"] == "PDF"
     assert doc.header["$DIMBLK"] in ("_ARCHTICK", "ARCHTICK")
+    # Text above the dimension line for new DIMs (not centered on the line).
+    assert ds.dimtad == 1 and ds.dimtmove == 0
+    assert doc.header["$DIMTAD"] == 1 and doc.header["$DIMTMOVE"] == 0
     st = doc.styles.get("PDF_TEXT").dxf
     assert (st.font, st.bigfont) == ("simplex.shx", "gbcbig.shx")
 

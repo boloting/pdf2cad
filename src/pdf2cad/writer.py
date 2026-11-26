@@ -300,7 +300,10 @@ class Writer:
         ds.dxf.dimtad = 1
         ds.dxf.dimtih = 0
         ds.dxf.dimtoh = 0
-        ds.dxf.dimtmove = 2
+        # 0 = AutoCAD places text from DIMTAD (above). 2 would leave new DIM text on the
+        # line where you click. Existing dims still override dimtmove=2 so PDF positions keep.
+        ds.dxf.dimtmove = 0
+        ds.dxf.dimupt = 0
         ds.dxf.dimdec = 0
         ds.dxf.dimzin = 8
         ds.dxf.dimdsep = ord(".")
@@ -335,7 +338,7 @@ class Writer:
             return
         keys = (
             "dimtxt", "dimasz", "dimtsz", "dimexe", "dimdle", "dimexo", "dimgap", "dimdli",
-            "dimtad", "dimtih", "dimtoh", "dimtmove", "dimscale", "dimdec", "dimzin", "dimdsep",
+            "dimtad", "dimtih", "dimtoh", "dimtmove", "dimupt", "dimscale", "dimdec", "dimzin", "dimdsep",
             "dimclrd", "dimclre", "dimclrt", "dimtxsty", "dimlfac", "dimblk", "dimblk1", "dimblk2",
             "dimtofl", "dimtdec",
         )
@@ -386,6 +389,8 @@ class Writer:
                 ov["dimse1"] = 1
             if not getattr(dim, "ext2", True):
                 ov["dimse2"] = 1
+            # Keep the PDF's own text position; style default is 0 for new AutoCAD DIMs.
+            ov["dimtmove"] = 2
             style = self.style_for(self.look(dim))
             exe, dle = self.extents(dim)
             sd = self.doc.dimstyles.get(style).dxf
