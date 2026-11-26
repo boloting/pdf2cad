@@ -12,7 +12,7 @@ from statistics import median
 import pymupdf
 from ezdxf.document import Drawing as DXFDocument
 
-from . import axes, blocks, dims, hatch, ocrtext
+from . import axes, blocks, dims, hatch, ocrtext, rectify
 from .dims import parse_value
 from .extract import extract_page
 from .geom import dot, line_angle
@@ -206,17 +206,37 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
     if opts.blocks:
         blocks.recognize(d, consumed)
 
+    fit = detect_scale(d)
     if opts.scale and opts.scale > 0:
         scale, source = float(opts.scale), "manual"
+        fit = fit or scale
+    elif fit:
+        intended = rectify.intended_scale(fit)
+        scale, source = (intended, "dimensions") if intended else (fit, "dimensions")
     else:
-        auto = detect_scale(d)
-        scale, source = (auto, "dimensions") if auto else (1.0, "default")
-        if auto is None and d.linear_dims:
+        scale, source = 1.0, "default"
+        if d.linear_dims:
             warnings.append("标注数值和图上长度对不上同一个比例，已按 1:1（图纸毫米）输出，可手动指定比例。")
-        if auto and auto >= 1 and not any(abs(auto / c - 1) < 1e-6 for c in COMMON_SCALES):
+
+    # Fit-to-page PDFs are off by about a millimetre per run; snap geometry to the labeled sizes.
+    if d.linear_dims and fit and fit > 0 and scale > 0:
+        info = rectify.rectify(d, fit, scale)
+        if info["horiz"] or info["vert"]:
+            if abs(fit / scale - 1) > 1e-6:
+                warnings.append(
+                    f"PDF 按“适合纸张”打印后量得约 1:{fit:g}，图签比例是 1:{scale:g}。"
+                    f"已按 1:{scale:g} 复原，并用 {info['horiz'] + info['vert']} 条正交标注把几何校正成真实尺寸，"
+                    "在 CAD 里量到的长度会与图上标注一致。"
+                )
+            else:
+                warnings.append(
+                    f"已用 {info['horiz'] + info['vert']} 条正交标注把几何校正成真实尺寸，"
+                    "在 CAD 里量到的长度会与图上标注一致。"
+                )
+        elif abs(fit / scale - 1) > 1e-6:
             warnings.append(
-                f"按标注数值反推出的比例是 1:{auto:g}，不是标准比例，PDF 可能是缩放打印的（例如“适合纸张”）。"
-                "已按这个比例还原真实尺寸。"
+                f"按标注数值反推出的比例是 1:{fit:g}，不是标准比例，PDF 可能是缩放打印的（例如“适合纸张”）。"
+                f"已按图签比例 1:{scale:g} 输出。"
             )
     if ocr_counts and ocr_counts["text"]:
         msg = f"用文字识别把 {ocr_counts['text']} 处转曲文字还原成了可编辑文字。"

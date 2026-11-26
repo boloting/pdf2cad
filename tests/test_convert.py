@@ -95,7 +95,8 @@ def test_outlined_digits_chain_and_fit_to_page_scale():
     r = convert_bytes(data)
     texts = sorted(d.text for d in r.drawing.linear_dims)
     assert texts == sorted(hx + vy)
-    assert r.report.scale == pytest.approx(100 / 0.96, rel=2e-4)
+    # Fit-to-page (~1:104) snaps back to the labeled 1:100 with true lengths.
+    assert r.report.scale == pytest.approx(100, abs=1e-6)
     assert r.report.recognized["线性标注"] == len(hx) + len(vy)
     assert any("笔画" in w for w in r.report.warnings)
     doc = reload(r)
@@ -103,6 +104,8 @@ def test_outlined_digits_chain_and_fit_to_page_scale():
     # glyph strokes, ticks and the two row lines are all absorbed into the dimensions
     assert len(msp.query("LWPOLYLINE")) == 0
     assert len(msp.query("HATCH")) == 0
+    measures = sorted(round(d.get_measurement()) for d in msp.query("DIMENSION"))
+    assert measures == sorted(int(v) for v in hx + vy)
     for d in msp.query("DIMENSION"):
         shown = d.dxf.text if d.dxf.text not in ("", "<>") else str(round(d.get_measurement()))
         assert shown in hx + vy
@@ -221,6 +224,41 @@ def test_ocr_cleanup_rules():
     assert clean("1.2OOM标高") == "1.200M标高"
     assert clean("[ICH=3500") == "CH=3500"
     assert clean("十冏十") == ""
+
+
+def test_fit_to_page_rectified_to_labeled_scale():
+    """A sheet printed at ~96% of 1:100 is restored to 1:100 with exact labeled lengths."""
+    from drawings import Page, filled_tick
+
+    pg = Page()
+    # Designed 3600×2400 at 1:100 → 36×24 paper mm; print shrink 4% → 34.56×23.04.
+    shrink = 0.96
+    x0, y0 = 40.0, 40.0
+    x1, y1 = x0 + 36 * shrink, y0 + 24 * shrink
+    pg.line((x0, y0), (x1, y0), width=0.25)
+    pg.line((x1, y0), (x1, y1), width=0.25)
+    pg.line((x1, y1), (x0, y1), width=0.25)
+    pg.line((x0, y1), (x0, y0), width=0.25)
+    yd = y0 - 8
+    pg.line((x0, yd), (x1, yd), width=0.15)
+    filled_tick(pg, (x0, yd))
+    filled_tick(pg, (x1, yd))
+    pg.line((x0, y0), (x0, yd - 1), width=0.15)
+    pg.line((x1, y0), (x1, yd - 1), width=0.15)
+    pg.text(((x0 + x1) / 2 - 3, yd + 1.2), "3600", height=2.5)
+    xd = x1 + 8
+    pg.line((xd, y0), (xd, y1), width=0.15)
+    filled_tick(pg, (xd, y0))
+    filled_tick(pg, (xd, y1))
+    pg.line((x1, y0), (xd + 1, y0), width=0.15)
+    pg.line((x1, y1), (xd + 1, y1), width=0.15)
+    pg.text((xd + 1.2, (y0 + y1) / 2 - 3), "2400", height=2.5, rotate=90)
+    r = convert_bytes(pg.save(), Options(ocr=False))
+    assert abs(r.report.scale - 100) < 1e-6, r.report
+    doc = reload(r)
+    measures = sorted(round(d.get_measurement()) for d in doc.modelspace().query("DIMENSION"))
+    assert measures == [2400, 3600], measures
+    assert any("1:100" in w for w in r.report.warnings)
 
 
 def test_dimstyles_carry_the_sizes():
