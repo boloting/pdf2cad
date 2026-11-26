@@ -289,9 +289,13 @@ class Writer:
         ds.dxf.dimtxt = txt
         ds.dxf.dimasz = asz
         ds.dxf.dimexe = exe
+        # Architectural ticks: a short run of the dimension line past the tick looks like CAD plots.
         ds.dxf.dimdle = dle if kind == "tick" else 0.0
-        ds.dxf.dimexo = 0.0
-        ds.dxf.dimgap = _nice(0.2 * txt)
+        if kind == "tick" and ds.dxf.dimdle <= 0:
+            ds.dxf.dimdle = _nice(0.5 * asz)
+        # Gap between the extension-line origin and the object — common on Chinese drawings.
+        ds.dxf.dimexo = 0.5
+        ds.dxf.dimgap = _nice(0.25 * txt)
         ds.dxf.dimdli = _nice(max(7.0, 3 * txt))
         ds.dxf.dimtad = 1
         ds.dxf.dimtih = 0
@@ -305,9 +309,9 @@ class Writer:
         ds.dxf.dimclrt = self.dim_aci
         ds.dxf.dimtxsty = TEXT_STYLE
         if kind == "tick":
-            # AutoCAD draws oblique ticks from DIMTSZ (set_arrows clears it, so set it after).
-            ds.set_arrows(blk="")
-            ds.dxf.dimtsz = asz / 2
+            # Use AutoCAD's _ARCHTICK so a new DIM matches the ticks we bake into existing dims.
+            ds.set_arrows(blk=_ARROW_BLOCKS["tick"])
+            ds.dxf.dimtsz = 0.0
         else:
             ds.set_arrows(blk=_ARROW_BLOCKS.get(kind, ""))
             ds.dxf.dimtsz = 0.0

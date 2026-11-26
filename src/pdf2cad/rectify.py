@@ -68,6 +68,9 @@ def rectify(d: Drawing, fit_scale: float, target_scale: float) -> dict:
     _scale_drawing(d, fit_scale)
     hx, hy = _solve_axes(d)
     _map_drawing(d, hx, hy)
+    # Second pass: nudge grid lines in the off-by-one band, then lock dim endpoints exact.
+    n_snap = _snap_dim_lengths(d)
+    n_snap += _enforce_dim_endpoints(d)
     _scale_drawing(d, 1.0 / target_scale)
     for dim in d.linear_dims:
         dim.measured = dist(dim.p1, dim.p2)
@@ -78,6 +81,7 @@ def rectify(d: Drawing, fit_scale: float, target_scale: float) -> dict:
         "vert": hy["constraints"],
         "clusters_x": hx["clusters"],
         "clusters_y": hy["clusters"],
+        "snapped": n_snap,
     }
 
 
@@ -381,3 +385,140 @@ def _map_bubble(b: AxisBubble, f, local_k) -> AxisBubble:
         b, center=f(b.center), radius=b.radius * k, text_height=b.text_height * k,
         slash=slash, part_pos=part,
     )
+
+
+def _snap_dim_lengths(d: Drawing) -> int:
+    """Nudge grid lines when a dim is only a few tenths off — the AutoCAD off-by-one band.
+
+    1650.6 displays as 1651 with DIMDEC 0. Residuals outside ~0.25–1.25 mm are left
+    to the least-squares solve (bigger conflicts need a compromise, not a hard pull).
+    """
+    buckets: dict[tuple[int, float], list[float]] = defaultdict(list)
+    for dim in d.linear_dims:
+        pv = parse_value(dim.text)
+        if not pv or pv[0] <= 0:
+            continue
+        value = pv[0]
+        ang = dim.angle % 180
+        if angle_diff(ang, 0.0) <= _AXIS_TOL:
+            axis = 0
+        elif angle_diff(ang, 90.0) <= _AXIS_TOL:
+            axis = 1
+        else:
+            continue
+        a, b = dim.p1[axis], dim.p2[axis]
+        span = abs(b - a)
+        if span < 1e-6:
+            continue
+        err = value - span
+        if not (0.25 <= abs(err) <= 1.25):
+            continue
+        far = round(max(a, b), 3)
+        buckets[(axis, far)].append(err)
+    total = 0
+    for axis in (0, 1):
+        moves = {line: median(errs) for (ax, line), errs in buckets.items() if ax == axis}
+        if moves:
+            _shift_axis_many(d, axis, moves, tol=0.85)
+            total += len(moves)
+    return total
+
+
+def _shift_axis_many(d: Drawing, axis: int, moves: dict[float, float], tol: float) -> None:
+    """Apply several line shifts on one axis in a single pass."""
+    lines = sorted(moves)
+
+    def delta_for(v: float) -> float:
+        # Nearest grid line within tol; lines are few dozen at most.
+        best = None
+        best_d = tol + 1.0
+        for line in lines:
+            dv = abs(v - line)
+            if dv <= tol and dv < best_d:
+                best, best_d = line, dv
+        return moves[best] if best is not None else 0.0
+
+    def shift_pt(p):
+        dlt = delta_for(p[axis])
+        if dlt == 0.0:
+            return p
+        return (p[0] + dlt, p[1]) if axis == 0 else (p[0], p[1] + dlt)
+
+    def shift_seg(g):
+        if isinstance(g, Line):
+            return Line(shift_pt(g.a), shift_pt(g.b))
+        if isinstance(g, Arc):
+            return Arc(shift_pt(g.center), g.radius, g.start_angle, g.sweep)
+        if isinstance(g, Bezier):
+            return Bezier(shift_pt(g.p0), shift_pt(g.p1), shift_pt(g.p2), shift_pt(g.p3))
+        return g
+
+    for s in d.shapes:
+        s.segs = [shift_seg(g) for g in s.segs]
+    for t in d.texts:
+        t.insert = shift_pt(t.insert)
+        x0, y0, x1, y1 = t.bbox
+        corners = [shift_pt((x0, y0)), shift_pt((x1, y0)), shift_pt((x0, y1)), shift_pt((x1, y1))]
+        t.bbox = (min(p[0] for p in corners), min(p[1] for p in corners),
+                  max(p[0] for p in corners), max(p[1] for p in corners))
+    for dim in d.linear_dims:
+        dim.p1 = shift_pt(dim.p1)
+        dim.p2 = shift_pt(dim.p2)
+        dim.base = shift_pt(dim.base)
+        dim.text_pos = shift_pt(dim.text_pos)
+        dim.measured = dist(dim.p1, dim.p2)
+    for dim in d.radial_dims:
+        dim.center = shift_pt(dim.center)
+        dim.point = shift_pt(dim.point)
+        dim.text_pos = shift_pt(dim.text_pos)
+        dim.radius = dist(dim.center, dim.point)
+    for ld in d.leaders:
+        ld.vertices = [shift_pt(v) for v in ld.vertices]
+        ld.text_pos = shift_pt(ld.text_pos)
+    for h in d.hatches:
+        h.loops = [[shift_seg(g) for g in loop] for loop in h.loops]
+        for fam in h.families:
+            fam.base = shift_pt(fam.base)
+    for ins in d.inserts:
+        ins.insert = shift_pt(ins.insert)
+    for b in d.axis_bubbles:
+        b.center = shift_pt(b.center)
+
+
+def _enforce_dim_endpoints(d: Drawing) -> int:
+    """Set each orthogonal dim's own endpoints to the exact labeled length.
+
+    Shared walls may still carry a sub-millimetre compromise from least squares; the
+    dimension entity itself then reads the label, so AutoCAD shows 1650 not 1651.
+    """
+    n = 0
+    for dim in d.linear_dims:
+        pv = parse_value(dim.text)
+        if not pv or pv[0] <= 0:
+            continue
+        value = pv[0]
+        ang = dim.angle % 180
+        if angle_diff(ang, 0.0) <= _AXIS_TOL:
+            axis = 0
+        elif angle_diff(ang, 90.0) <= _AXIS_TOL:
+            axis = 1
+        else:
+            continue
+        a0, b0 = dim.p1[axis], dim.p2[axis]
+        span = abs(b0 - a0)
+        if span < 1e-6 or abs(value - span) < 0.01:
+            continue
+        sign = 1.0 if b0 >= a0 else -1.0
+        new_b = a0 + sign * value
+        delta = new_b - b0
+        if axis == 0:
+            dim.p2 = (new_b, dim.p2[1])
+            dim.base = (dim.base[0] + delta, dim.base[1]) if abs(dim.base[0] - b0) <= 0.85 else dim.base
+            dim.text_pos = (dim.text_pos[0] + delta / 2, dim.text_pos[1])
+        else:
+            dim.p2 = (dim.p2[0], new_b)
+            dim.base = (dim.base[0], dim.base[1] + delta) if abs(dim.base[1] - b0) <= 0.85 else dim.base
+            dim.text_pos = (dim.text_pos[0], dim.text_pos[1] + delta / 2)
+        dim.measured = value
+        n += 1
+    return n
