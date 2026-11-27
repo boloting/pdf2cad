@@ -27,6 +27,7 @@ _UNITS = {0: "无单位", 1: "英寸", 2: "英尺", 4: "毫米", 5: "厘米", 6:
 _ENDPOINT_TOL = 1.0  # mm: a dimension end this close to an axis line measures that axis
 _AXIS_NEAR = 60.0  # mm: a dimension whose ends are this close to two axes is about their spacing
 _ON_GEOMETRY = 0.05  # mm: a dimension end this close to a drawn line or vertex sits on it
+_SAME_AXIS = 100.0  # mm: bubbles with one label further apart than this belong to different plans
 _WALL_MIN_LEN = 500.0
 _WALL_GAP = (80.0, 400.0)
 
@@ -193,10 +194,22 @@ def _axes(msp) -> dict[int, dict[str, list[float]]]:
 
 
 def _axis_stats(msp, dims: list[dict], gap) -> dict:
-    axes = _axes(msp)
+    # One sheet may hold several plans that reuse the same axis labels: positions of a
+    # label further apart than _SAME_AXIS are different axes.
+    clusters: dict[int, list[tuple[str, list[float]]]] = {0: [], 1: []}
+    for axis, by_label in _axes(msp).items():
+        for label, vals in by_label.items():
+            vals = sorted(vals)
+            group = [vals[0]]
+            for v in vals[1:]:
+                if v - group[-1] > _SAME_AXIS:
+                    clusters[axis].append((label, group))
+                    group = []
+                group.append(v)
+            clusters[axis].append((label, group))
     spacing = []
     for axis in (0, 1):
-        pos = sorted(((median(v), k) for k, v in axes[axis].items()), key=lambda t: t[0])
+        pos = sorted(((median(v), k) for k, v in clusters[axis]), key=lambda t: t[0])
         for (p1, n1), (p2, n2) in pairwise(pos):
             near = [
                 d for d in dims
@@ -228,9 +241,9 @@ def _axis_stats(msp, dims: list[dict], gap) -> dict:
                 row["dim_end_off_axis"] = max(loose)
             spacing.append(row)
     checked = [r["residual"] for r in spacing if "residual" in r]
-    spread = [max(v) - min(v) for a in axes.values() for v in a.values() if len(v) > 1]
+    spread = [max(v) - min(v) for c in clusters.values() for _k, v in c if len(v) > 1]
     return {
-        "count": sum(len(a) for a in axes.values()),
+        "count": sum(len(c) for c in clusters.values()),
         "spacings": spacing,
         "spacings_labeled": len(checked),
         "spacings_exact": sum(1 for v in checked if v < 0.005),

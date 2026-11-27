@@ -317,11 +317,14 @@ def _conflict_warning(conflicts: list[dict]) -> str:
         why = "和其它标注对不上" if c["reason"] == "labels" else "和图上画的长度对不上"
         return f"{span}标“{c['text']}”实为 {c['drawn']:g}（{why}）"
 
-    shown = sorted(conflicts, key=lambda c: (c["from"] is None, -abs(c["deviation"])))[:6]
-    more = f"等 {len(conflicts)} 处" if len(conflicts) > len(shown) else ""
+    groups: dict[str, int] = Counter(name(c) for c in sorted(
+        conflicts, key=lambda c: (c["from"] is None, -abs(c["deviation"]))
+    ))
+    shown = [f"{k}×{n}" if n > 1 else k for k, n in list(groups.items())[:6]]
+    more = f"等 {len(conflicts)} 处" if len(groups) > len(shown) else ""
     return (
         f"有 {len(conflicts)} 个标注数值和图面不一致，没有硬改图形去迁就："
-        + "；".join(name(c) for c in shown) + more
+        + "；".join(shown) + more
         + f"。这些标注保留图上画的位置，显示原标注文字，放在“{DIM_REVIEW_LAYER}”图层，请核对。"
     )
 
