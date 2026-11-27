@@ -213,6 +213,10 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
     if opts.hatches:
         hatch.recognize_solid(d, consumed)
         hatch.recognize_pattern(d, consumed, opts.min_hatch_lines)
+        if d.hatches and getattr(d, "fills_under_content", False):
+            warnings.append(
+                "原图填充画在墙线、文字下面（内容可见），已把填充放到显示底层，避免盖住图纸。"
+            )
     dup = dedupe_lines(d, consumed)
     if opts.blocks:
         blocks.recognize(d, consumed)

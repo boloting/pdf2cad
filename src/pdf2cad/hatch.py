@@ -11,6 +11,7 @@ from .geom import (
     polygon_area, sub,
 )
 from .model import Arc, Drawing, Hatch, HatchFamily, Line, Seg, Shape, Style
+from .spatial import Grid
 
 ON_TOL = 0.12
 TINY_FILL = 1.0
@@ -18,6 +19,53 @@ TINY_FILL = 1.0
 
 def _is_white(c) -> bool:
     return c is not None and all(v >= 0.98 for v in c)
+
+
+def _bbox_area(b: tuple[float, float, float, float]) -> float:
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def fills_under_content(d: Drawing, samples: int = 40) -> bool:
+    """True when PDF paints strokes/text after fills that they sit on.
+
+    CAD plots almost always fill floors first, then draw walls on top. If we emit
+    HATCH after LINE in the DXF, those fills cover the drawing. Detect the PDF
+    paint order (path_id) on the largest fills before choosing draw order.
+    """
+    fills = [
+        s for s in d.shapes
+        if s.fill is not None and not _is_white(s.fill) and _bbox_area(s.bbox()) >= 100.0
+    ]
+    if not fills:
+        return True
+    fills.sort(key=lambda s: -_bbox_area(s.bbox()))
+    picks = fills[:samples]
+    strokes = [s for s in d.shapes if s.stroke and (s.fill is None or s.stroke)]
+    grid: Grid[int] = Grid(20.0)
+    for s in strokes:
+        bb = s.bbox()
+        if max(bb[2] - bb[0], bb[3] - bb[1]) < 1.0:
+            continue
+        grid.insert(bb, s.id)
+    by_id = {s.id: s for s in strokes}
+    under = 0
+    checked = 0
+    for f in picks:
+        bb = f.bbox()
+        pad = min(5.0, 0.05 * min(bb[2] - bb[0], bb[3] - bb[1]))
+        checked += 1
+        for sid in grid.query(bb, 0.0):
+            s = by_id.get(sid)
+            if s is None or s.path_id <= f.path_id:
+                continue
+            sb = s.bbox()
+            mx, my = (sb[0] + sb[2]) / 2, (sb[1] + sb[3]) / 2
+            if bb[0] + pad <= mx <= bb[2] - pad and bb[1] + pad <= my <= bb[3] - pad:
+                under += 1
+                break
+    if checked == 0:
+        return True
+    return under >= max(1, (checked + 1) // 2)
 
 
 def _loop_polygon(segs: list[Seg]) -> list[Vec]:
@@ -31,6 +79,7 @@ def _loop_polygon(segs: list[Seg]) -> list[Vec]:
 
 
 def recognize_solid(d: Drawing, consumed: set[int]) -> None:
+    d.fills_under_content = fills_under_content(d)  # type: ignore[attr-defined]
     by_path: dict[int, list[Shape]] = defaultdict(list)
     for s in d.shapes:
         if s.id in consumed or s.fill is None:
@@ -534,4 +583,4 @@ def _name_pattern(h: Hatch) -> None:
         h.pattern_scale = round(fams[0].spacing / ANSI_SPACING, 4)
 
 
-__all__ = ["recognize_dashed", "recognize_pattern", "recognize_solid", "Arc"]
+__all__ = ["fills_under_content", "recognize_dashed", "recognize_pattern", "recognize_solid", "Arc"]

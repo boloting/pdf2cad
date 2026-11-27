@@ -5,7 +5,8 @@ import ezdxf
 import pytest
 
 from drawings import (
-    axis_grid_pdf, centered_dims_pdf, crowded_dims_pdf, outlined_dims_pdf, outlined_text_pdf, plan_pdf,
+    axis_grid_pdf, centered_dims_pdf, crowded_dims_pdf, floor_fill_under_walls_pdf,
+    outlined_dims_pdf, outlined_text_pdf, plan_pdf,
 )
 from pdf2cad.model import LinearDim
 from pdf2cad.writer import infer_dimtad
@@ -334,6 +335,20 @@ def test_plan_hatch_with_island_and_solid(plan):
     assert len(pattern) == 1 and len(pattern[0].loops) == 2
     assert pattern[0].families[0].spacing == pytest.approx(1.5, abs=1e-3)
     assert len(solid) == 1
+
+
+def test_hatches_drawn_under_geometry_when_pdf_fills_are_background():
+    # Floor fill painted before wall strokes → HATCH under LINE + SORTENTS order.
+    r = convert_bytes(floor_fill_under_walls_pdf(), Options(dimensions=False, blocks=False, ocr=False))
+    assert getattr(r.drawing, "fills_under_content", None) is True
+    assert any("填充" in w and "底层" in w for w in r.report.warnings)
+    msp = reload(r).modelspace()
+    kinds = [e.dxftype() for e in msp]
+    assert kinds.index("HATCH") < kinds.index("LINE")
+    order = dict(msp.get_redraw_order())
+    hatch_h = next(e.dxf.handle for e in msp.query("HATCH"))
+    line_h = next(e.dxf.handle for e in msp.query("LINE"))
+    assert int(order[hatch_h], 16) < int(order[line_h], 16)
 
 
 def test_plan_layers_without_ocg(plan):

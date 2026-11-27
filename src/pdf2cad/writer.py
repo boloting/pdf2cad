@@ -563,6 +563,12 @@ class Writer:
                 self.shape(blk, s)
         block_counts = Counter(self.counts)
         self.counts.clear()
+        # PDF paint order: if strokes sit on top of fills, emit HATCH first so CAD
+        # does not cover walls/text. Otherwise keep fills on top like the PDF.
+        self.fills_under = bool(getattr(d, "fills_under_content", True)) and bool(d.hatches)
+        if self.fills_under:
+            for h in d.hatches:
+                self.hatch(h)
         for ins in d.inserts:
             a = {"layer": self.layer_name(ins.layer, "geometry", ins.style), "rotation": ins.rotation}
             self.msp.add_blockref(ins.name, self.X(ins.insert), dxfattribs=a)
@@ -572,8 +578,9 @@ class Writer:
         for s in d.shapes:
             if s.id not in consumed:
                 self.shape(self.msp, s)
-        for h in d.hatches:
-            self.hatch(h)
+        if not self.fills_under:
+            for h in d.hatches:
+                self.hatch(h)
         for t in d.texts:
             if t.id not in used_texts:
                 self.text(self.msp, t)
@@ -581,6 +588,7 @@ class Writer:
         self.radial_dims()
         self.leaders()
         self._finish_layers()
+        self._finish_draw_order()
 
         w, h = d.width * self.s, d.height * self.s
         doc.header["$EXTMIN"] = (0, 0, 0)
@@ -607,6 +615,22 @@ class Writer:
             if name not in self.doc.layers:
                 self.doc.layers.add(name)
         self._colors_bylayer()
+
+    def _finish_draw_order(self) -> None:
+        """Pin solid fills under geometry when the PDF painted them that way."""
+        if not getattr(self, "fills_under", False):
+            return
+        hatches = [e for e in self.msp if e.dxftype() == "HATCH"]
+        others = [e for e in self.msp if e.dxftype() != "HATCH"]
+        if not hatches or not others:
+            return
+        # Non-zero sort handles: "0" would force entities to the top in AutoCAD.
+        mapping = [(e.dxf.handle, f"{i + 1:X}") for i, e in enumerate(hatches)]
+        base = len(hatches) + 1
+        mapping.extend((e.dxf.handle, f"{base + i:X}") for i, e in enumerate(others))
+        self.msp.set_redraw_order(mapping)
+        # Bit 16 = honour SORTENTSTABLE on regen; 127 matches common CAD defaults.
+        self.doc.header["$SORTENTS"] = 127
 
     def _colors_bylayer(self) -> None:
         """Drop explicit colours that equal their layer's colour so they read BYLAYER."""

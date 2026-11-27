@@ -385,3 +385,18 @@ def plan_pdf() -> bytes:
 
     pg.text((40, 190), "FLOOR PLAN 1:100", 5)
     return pg.save()
+
+
+def floor_fill_under_walls_pdf() -> bytes:
+    """Large gray floor fill painted first, then wall strokes on top (typical CAD plot)."""
+    pg = Page()
+    gray = (0.75, 0.75, 0.75)
+    pg.poly([(40, 40), (250, 40), (250, 160), (40, 160)], width=0, fill=gray)
+    # Walls drawn after the fill so content over the fill is visible in the PDF.
+    pg.line((40, 40), (250, 40), width=0.4)
+    pg.line((250, 40), (250, 160), width=0.4)
+    pg.line((250, 160), (40, 160), width=0.4)
+    pg.line((40, 160), (40, 40), width=0.4)
+    pg.line((120, 40), (120, 160), width=0.35)
+    pg.line((40, 100), (250, 100), width=0.35)
+    return pg.save()
