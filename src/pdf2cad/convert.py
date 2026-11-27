@@ -17,7 +17,7 @@ from .dims import parse_value
 from .extract import extract_page
 from .geom import dot, line_angle
 from .model import COMMON_SCALES, Drawing, Line, Shape, Style
-from .writer import Writer
+from .writer import DIM_REVIEW_LAYER, Writer
 
 
 @dataclass
@@ -49,6 +49,8 @@ class Report:
     recognized: dict[str, int] = field(default_factory=dict)
     block_names: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Dimension-true redraw: flagged labels and residuals (model units are millimetres).
+    dimension_check: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -233,26 +235,30 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
         if d.linear_dims:
             warnings.append("标注数值和图上长度对不上同一个比例，已按 1:1（图纸毫米）输出，可手动指定比例。")
 
-    # Fit-to-page PDFs are off by about a millimetre per run; snap geometry to the labeled sizes.
+    # Fit-to-page PDFs carry plotting noise on every vertex; redraw geometry to the labels.
+    check: dict = {}
     if d.linear_dims and fit and fit > 0 and scale > 0:
         info = rectify.rectify(d, fit, scale)
-        if info["horiz"] or info["vert"]:
-            if abs(fit / scale - 1) > 1e-6:
-                warnings.append(
-                    f"PDF 按“适合纸张”打印后量得约 1:{fit:g}，图签比例是 1:{scale:g}。"
-                    f"已按 1:{scale:g} 复原，并用 {info['horiz'] + info['vert']} 条正交标注把几何校正成真实尺寸，"
-                    "在 CAD 里量到的长度会与图上标注一致。"
-                )
-            else:
-                warnings.append(
-                    f"已用 {info['horiz'] + info['vert']} 条正交标注把几何校正成真实尺寸，"
-                    "在 CAD 里量到的长度会与图上标注一致。"
-                )
+        check = {k: info[k] for k in ("conflicts", "residuals", "stations_x", "stations_y")}
+        n_used = info["horiz"] + info["vert"]
+        if n_used:
+            head = (
+                f"PDF 按“适合纸张”打印后量得约 1:{fit:g}，图签比例是 1:{scale:g}，已按 1:{scale:g} 复原。"
+                if abs(fit / scale - 1) > 1e-6 else ""
+            )
+            walls = info["residuals"]["walls"]["snapped"]
+            warnings.append(
+                head + f"已用 {n_used} 条互相一致的正交标注把轴线和墙线重绘到标注尺寸（模型单位毫米），"
+                + (f"并把 {walls} 处墙面对齐到整 10 毫米的墙厚，" if walls else "")
+                + "在 CAD 里量到的长度与图上标注一致。"
+            )
         elif abs(fit / scale - 1) > 1e-6:
             warnings.append(
                 f"按标注数值反推出的比例是 1:{fit:g}，不是标准比例，PDF 可能是缩放打印的（例如“适合纸张”）。"
                 f"已按图签比例 1:{scale:g} 输出。"
             )
+        if info["conflicts"]:
+            warnings.append(_conflict_warning(info["conflicts"]))
     if ocr_counts and ocr_counts["text"]:
         msg = f"用文字识别把 {ocr_counts['text']} 处转曲文字还原成了可编辑文字。"
         if ocr_counts["review"]:
@@ -300,9 +306,24 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
         page_size_mm=(round(d.width, 1), round(d.height, 1)), scale=scale, scale_source=source,
         pdf_layers=d.has_pdf_layers, layers=sorted(l.dxf.name for l in dxf.layers),
         entities=dict(sorted(entities.items())), recognized=recognized,
-        block_names=[b.name for b in d.blocks], warnings=warnings,
+        block_names=[b.name for b in d.blocks], warnings=warnings, dimension_check=check,
     )
     return Result(dxf, report, d)
+
+
+def _conflict_warning(conflicts: list[dict]) -> str:
+    def name(c: dict) -> str:
+        span = f"{c['from']}–{c['to']} 轴" if c["from"] and c["to"] else f"{'横向' if c['axis'] == 'x' else '竖向'}"
+        why = "和其它标注对不上" if c["reason"] == "labels" else "和图上画的长度对不上"
+        return f"{span}标“{c['text']}”实为 {c['drawn']:g}（{why}）"
+
+    shown = sorted(conflicts, key=lambda c: (c["from"] is None, -abs(c["deviation"])))[:6]
+    more = f"等 {len(conflicts)} 处" if len(conflicts) > len(shown) else ""
+    return (
+        f"有 {len(conflicts)} 个标注数值和图面不一致，没有硬改图形去迁就："
+        + "；".join(name(c) for c in shown) + more
+        + f"。这些标注保留图上画的位置，显示原标注文字，放在“{DIM_REVIEW_LAYER}”图层，请核对。"
+    )
 
 
 def convert_bytes(data: bytes, opts: Options | None = None) -> Result:

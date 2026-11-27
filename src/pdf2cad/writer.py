@@ -17,6 +17,7 @@ from .model import Arc, Bezier, Color, Drawing, Hatch, Line, Shape, Style
 
 TEXT_STYLE = "PDF_TEXT"
 REVIEW_LAYER = "PDF_文字_待核对"
+DIM_REVIEW_LAYER = "PDF_标注_待核对"
 _CJK = re.compile(r"[\u3000-\u9fff\uff00-\uffef]")
 DIM_STYLE = "PDF"
 
@@ -406,7 +407,8 @@ class Writer:
 
     def linear_dims(self) -> None:
         for dim in self.d.linear_dims:
-            a = self.attribs(dim.layer, "dim", dim.color)
+            layer = DIM_REVIEW_LAYER if dim.review else dim.layer
+            a = self.attribs(layer, "dim", dim.color)
             text, ov = self.dim_text(dim.text, dim.measured * self.s)
             ov.update(self.dim_colors(a))
             if not getattr(dim, "ext1", True):

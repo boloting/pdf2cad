@@ -211,6 +211,9 @@ class LinearDim:
     measured: float
     layer: str | None
     color: Color | None
+    # The printed value disagrees with the drawing or with other dimensions; keep the
+    # drawn geometry and leave the number for a person to check.
+    review: bool = False
 
 
 @dataclass

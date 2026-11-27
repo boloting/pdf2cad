@@ -1,27 +1,35 @@
 """Snap a fit-to-page PDF to its labeled scale and true dimension lengths.
 
-PDF plots printed with “fit to page” come out at a non-standard scale (e.g. 1:104)
-and individual lengths are off by about a millimetre. The title block still says
-1:100 and the numbers on the dimensions are the design sizes. This module:
+PDF plots printed with “fit to page” come out at a non-standard scale (e.g. 1:104),
+and every vertex carries a little plotting noise (coordinates are quantised, so
+individual lengths are off by one to three millimetres). The title block still says
+1:100, and the numbers on the dimensions are the design sizes. This module maps the
+drawing first, then redraws it to the labels:
 
 1. Moves geometry into real millimetres with the detected fit scale.
-2. Treats orthogonal linear dimensions as distance constraints and solves for
-   corrected X and Y coordinates (least squares on clustered grid lines).
-3. Writes coordinates back in paper millimetres at the intended scale (1:100),
-   so AutoCAD’s DIM reads the same numbers that are printed on the drawing.
+2. Clusters the ends of orthogonal dimensions into stations (grid lines) per axis and
+   arbitrates the labels: a label far from the drawn length, or one that contradicts
+   other labels around a loop, is flagged for review instead of being forced.
+3. Solves the station positions from the remaining labels and rounds them to whole
+   millimetres, so every accepted label is met exactly.
+4. Maps everything piecewise-linearly between stations, then snaps nearby vertices
+   exactly onto the stations, and parallel wall faces onto whole-10 mm thicknesses.
+5. Writes coordinates back in paper millimetres at the intended scale (1:100), so
+   AutoCAD’s DIM reads the same numbers that are printed on the drawing.
 """
 
 from __future__ import annotations
 
+import bisect
 import math
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from statistics import median
 
 import numpy as np
 
 from .dims import parse_value
-from .geom import angle_diff, dist, line_angle
+from .geom import angle_diff, dist
 from .model import (
     COMMON_SCALES,
     Arc,
@@ -30,7 +38,6 @@ from .model import (
     Drawing,
     Hatch,
     HatchFamily,
-    Insert,
     Leader,
     Line,
     LinearDim,
@@ -40,12 +47,25 @@ from .model import (
     TextItem,
 )
 
-# How far two real-mm coordinates may drift and still be the same grid line.
-_CLUSTER_TOL = 0.8
+# Tolerances in paper millimetres (multiplied by the drawing scale): plotting noise is
+# a property of the sheet, not of the building.
+# Dimension ends this close are the same station (grid line).
+_CLUSTER_PAPER = 0.015
+# A label this far from the drawn length is not a rounding difference: flag it.
+_GROSS_PAPER = 0.06
+# After redraw, vertices this close to a station are put exactly on it.
+_SNAP_PAPER = 0.02
 # A dimension is horizontal/vertical if its angle is within this of 0°/90°.
 _AXIS_TOL = 4.0
 # Fit-to-page scales within this fraction of a standard scale snap to that standard.
 _FIT_TOL = 0.08
+
+# Wall thickness snap, in real millimetres; only for building scales (1:20 and smaller).
+_WALL_MIN_SCALE = 20
+_WALL_MIN_LEN = 500.0
+_WALL_GAP = (80.0, 400.0)
+_WALL_MODULE = 10.0
+_WALL_TOL = 1.5
 
 
 def intended_scale(fit: float) -> float | None:
@@ -61,16 +81,30 @@ def intended_scale(fit: float) -> float | None:
 def rectify(d: Drawing, fit_scale: float, target_scale: float) -> dict:
     """Rewrite `d` in place to target_scale paper mm with dimension-true lengths.
 
-    Returns counts for the conversion warning.
+    Flagged dimensions get ``review = True``. Returns counts, conflicts and residuals.
     """
     if fit_scale <= 0 or target_scale <= 0:
-        return {"horiz": 0, "vert": 0, "clusters_x": 0, "clusters_y": 0}
+        return {"horiz": 0, "vert": 0, "conflicts": [], "residuals": {}}
     _scale_drawing(d, fit_scale)
-    hx, hy = _solve_axes(d)
+    hx = _solve_axis(d, 0, target_scale)
+    hy = _solve_axis(d, 1, target_scale)
+    for info in (hx, hy):
+        for c in info["flagged"]:
+            d.linear_dims[c.dim].review = True
     _map_drawing(d, hx, hy)
-    # Second pass: nudge grid lines in the off-by-one band, then lock dim endpoints exact.
-    n_snap = _snap_dim_lengths(d)
-    n_snap += _enforce_dim_endpoints(d)
+    snap = _SNAP_PAPER * target_scale
+    _place_dims(d, hx, 0)
+    _place_dims(d, hy, 1)
+    _transform_points(d, _snapper(hx["targets"], snap), _snapper(hy["targets"], snap))
+    walls = {"pairs": 0, "snapped": 0}
+    if target_scale >= _WALL_MIN_SCALE:
+        for axis, info in ((0, hx), (1, hy)):
+            w = _snap_walls(d, axis, info["targets"])
+            walls["pairs"] += w["pairs"]
+            walls["snapped"] += w["snapped"]
+    conflicts = _describe_conflicts(d, hx, 0) + _describe_conflicts(d, hy, 1)
+    residuals = _residuals(d, hx, hy)
+    residuals["walls"] = walls
     _scale_drawing(d, 1.0 / target_scale)
     for dim in d.linear_dims:
         dim.measured = dist(dim.p1, dim.p2)
@@ -79,9 +113,10 @@ def rectify(d: Drawing, fit_scale: float, target_scale: float) -> dict:
     return {
         "horiz": hx["constraints"],
         "vert": hy["constraints"],
-        "clusters_x": hx["clusters"],
-        "clusters_y": hy["clusters"],
-        "snapped": n_snap,
+        "stations_x": hx["stations"],
+        "stations_y": hy["stations"],
+        "conflicts": conflicts,
+        "residuals": residuals,
     }
 
 
@@ -181,117 +216,175 @@ def _scale_bubble(b: AxisBubble, f, k: float) -> AxisBubble:
     )
 
 
-# -- orthogonal solve --------------------------------------------------------------
+# -- dimension constraints ---------------------------------------------------------
 
-def _solve_axes(d: Drawing) -> tuple[dict, dict]:
-    horiz, vert = [], []
-    for dim in d.linear_dims:
+@dataclass
+class _Con:
+    dim: int  # index into d.linear_dims
+    lo: float  # real-mm coordinates of the two ends along the axis, lo <= hi
+    hi: float
+    value: float
+    dec: int
+    i: int = 0  # stations of lo / hi
+    j: int = 0
+    reason: str = ""
+
+    @property
+    def dev(self) -> float:
+        """Label minus drawn length."""
+        return self.value - (self.hi - self.lo)
+
+
+def dim_axis(dim: LinearDim) -> int | None:
+    """0 for a dimension measuring X, 1 for Y, None for an aligned/rotated one."""
+    ang = dim.angle % 180
+    if angle_diff(ang, 0.0) <= _AXIS_TOL:
+        return 0
+    if angle_diff(ang, 90.0) <= _AXIS_TOL:
+        return 1
+    return None
+
+
+def _constraints(d: Drawing, axis: int) -> list[_Con]:
+    out = []
+    for n, dim in enumerate(d.linear_dims):
+        if dim_axis(dim) != axis:
+            continue
         pv = parse_value(dim.text)
         if not pv or pv[0] <= 0:
             continue
-        value = pv[0]
-        ang = dim.angle % 180
-        if angle_diff(ang, 0.0) <= _AXIS_TOL:
-            horiz.append((dim.p1[0], dim.p2[0], value, (dim.p1[1] + dim.p2[1]) / 2))
-        elif angle_diff(ang, 90.0) <= _AXIS_TOL:
-            vert.append((dim.p1[1], dim.p2[1], value, (dim.p1[0] + dim.p2[0]) / 2))
-    return _solve_1d(horiz), _solve_1d(vert)
+        a, b = dim.p1[axis], dim.p2[axis]
+        out.append(_Con(n, min(a, b), max(a, b), pv[0], pv[1]))
+    return out
 
 
 def _cluster(values: list[float], tol: float) -> tuple[list[float], list[int]]:
-    """Cluster sorted values; return representative positions and index of each value."""
+    """Single-link clusters of values; representative (median) and cluster of each value."""
     order = sorted(range(len(values)), key=lambda i: values[i])
-    reps: list[float] = []
-    groups: list[list[float]] = []
     assign = [0] * len(values)
+    groups: list[list[float]] = []
+    prev = None
     for i in order:
         v = values[i]
-        if not groups or v - groups[-1][-1] > tol:
-            groups.append([v])
-            reps.append(v)
-        else:
-            groups[-1].append(v)
-            reps[-1] = median(groups[-1])
+        if prev is None or v - prev > tol:
+            groups.append([])
+        groups[-1].append(v)
         assign[i] = len(groups) - 1
-    # Recompute reps as medians after assignment is stable.
-    buckets: list[list[float]] = [[] for _ in reps]
-    for i, v in enumerate(values):
-        buckets[assign[i]].append(v)
-    reps = [median(b) for b in buckets]
-    return reps, assign
+        prev = v
+    return [median(g) for g in groups], assign
 
 
-def _solve_1d(constraints_raw: list[tuple[float, float, float, float]]) -> dict:
-    """constraints_raw: (a, b, value, along) in real mm. Returns map info."""
-    if len(constraints_raw) < 1:
-        return {"map": None, "constraints": 0, "clusters": 0}
-    values = []
-    edges = []  # (idx_a, idx_b will be filled after clustering)
-    for a, b, value, _along in constraints_raw:
-        values.append(a)
-        values.append(b)
-    reps, assign = _cluster(values, _CLUSTER_TOL)
+def _least_squares(reps: list[float], cons: list[_Con]) -> tuple[np.ndarray, np.ndarray]:
+    """p[j] - p[i] = value for every constraint, with a weak pull to the drawn positions."""
     n = len(reps)
-    if n < 2:
-        return {"map": None, "constraints": 0, "clusters": n}
-    # Build signed constraints between clusters.
-    cons: list[tuple[int, int, float]] = []
-    for i, (a, b, value, _along) in enumerate(constraints_raw):
-        ia, ib = assign[2 * i], assign[2 * i + 1]
-        if ia == ib:
-            continue
-        if reps[ib] >= reps[ia]:
-            cons.append((ia, ib, value))
-        else:
-            cons.append((ib, ia, value))
-    if len(cons) < 1:
-        return {"map": None, "constraints": 0, "clusters": n}
+    m = len(cons)
+    a = np.zeros((m + n, n))
+    rhs = np.zeros(m + n)
+    for r, c in enumerate(cons):
+        a[r, c.j] = 1.0
+        a[r, c.i] = -1.0
+        rhs[r] = c.value
+    w = 1e-3  # anchors each connected group; the labels decide the spacing
+    a[m + np.arange(n), np.arange(n)] = w
+    rhs[m:] = w * np.asarray(reps)
+    sol, *_ = np.linalg.lstsq(a, rhs, rcond=None)
+    res = np.array([sol[c.j] - sol[c.i] - c.value for c in cons])
+    return sol, res
 
-    # Least squares: for each (i,j,v), p[j]-p[i] = v, plus weak pull to original reps.
-    rows = []
-    rhs = []
-    for i, j, v in cons:
-        row = np.zeros(n)
-        row[j] = 1.0
-        row[i] = -1.0
-        rows.append(row)
-        rhs.append(v)
-    w = 0.005  # keep the grid from drifting; dimensions dominate.
-    for i, r in enumerate(reps):
-        row = np.zeros(n)
-        row[i] = w
-        rows.append(row)
-        rhs.append(w * r)
-    A = np.vstack(rows)
-    b = np.asarray(rhs, dtype=float)
-    sol, *_ = np.linalg.lstsq(A, b, rcond=None)
-    old = list(reps)
-    new = list(sol)
-    # Keep order: enforce monotonicity by sorting pairs together if a crossing appears.
-    pairs = sorted(zip(old, new), key=lambda t: t[0])
-    old = [p[0] for p in pairs]
-    new = [p[1] for p in pairs]
-    for i in range(1, len(new)):
-        if new[i] <= new[i - 1]:
-            new[i] = new[i - 1] + 1e-6
 
+def _components(n: int, cons: list[_Con]) -> list[list[int]]:
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for c in cons:
+        parent[find(c.i)] = find(c.j)
+    groups: dict[int, list[int]] = defaultdict(list)
+    for s in {s for c in cons for s in (c.i, c.j)}:
+        groups[find(s)].append(s)
+    return list(groups.values())
+
+
+def _solve_axis(d: Drawing, axis: int, target: float) -> dict:
+    """Arbitrate the labels on one axis and solve dimension-true station positions."""
+    cons = _constraints(d, axis)
+    info: dict = {"tol": _CLUSTER_PAPER * target, "map": None, "constraints": 0, "stations": 0, "flagged": [], "kept": [],
+                  "targets": [], "station_of": {}, "new": {}, "shift": []}
+    if not cons:
+        return info
+    reps, assign = _cluster([v for c in cons for v in (c.lo, c.hi)], info["tol"])
+    for k, c in enumerate(cons):
+        c.i, c.j = assign[2 * k], assign[2 * k + 1]
+    gross = _GROSS_PAPER * target
+    flagged = []
+    keep = []
+    for c in cons:
+        if abs(c.dev) > gross:
+            c.reason = "drawn"
+            flagged.append(c)
+        elif c.i != c.j:
+            keep.append(c)
+    max_dec = max((c.dec for c in keep), default=0)
+    cycle_tol = 0.5 * 10.0 ** -max_dec
+    sol = np.asarray(reps, dtype=float)
+    while keep:
+        sol, res = _least_squares(reps, keep)
+        bad = [k for k in range(len(keep)) if abs(res[k]) > cycle_tol]
+        if not bad:
+            break
+        # The labels around a loop disagree: blame the one that also disagrees most
+        # with what is drawn, and leave it for review.
+        worst = max(bad, key=lambda k: (abs(keep[k].dev), abs(res[k])))
+        c = keep.pop(worst)
+        c.reason = "labels"
+        flagged.append(c)
+    info["flagged"] = flagged
+    info["kept"] = keep
+    if not keep:
+        return info
+
+    new = sol.copy()
+    if all(float(c.value).is_integer() for c in keep):
+        # Whole-millimetre labels: put stations a whole number of mm apart within each
+        # connected group so every accepted label is met exactly, not to 0.3 mm.
+        degree: dict[int, int] = defaultdict(int)
+        for c in keep:
+            degree[c.i] += 1
+            degree[c.j] += 1
+        for comp in _components(len(reps), keep):
+            ref = max(comp, key=lambda s: degree[s])
+            for s in comp:
+                new[s] = sol[ref] + round(sol[s] - sol[ref])
+    used = sorted({s for c in keep for s in (c.i, c.j)}, key=lambda s: reps[s])
+    old_pos = [reps[s] for s in used]
+    new_pos = [float(new[s]) for s in used]
+    for k in range(1, len(new_pos)):
+        if new_pos[k] <= new_pos[k - 1]:
+            new_pos[k] = new_pos[k - 1] + 1e-6
+    info.update(
+        map=_piecewise(old_pos, new_pos), constraints=len(keep), stations=len(used),
+        targets=new_pos, new={s: p for s, p in zip(used, new_pos)},
+        shift=[n - o for o, n in zip(old_pos, new_pos)],
+    )
+    return info
+
+
+def _piecewise(old: list[float], new: list[float]):
     def fmap(x: float) -> float:
         if x <= old[0]:
             return new[0] + (x - old[0])
         if x >= old[-1]:
             return new[-1] + (x - old[-1])
-        # Piecewise linear between cluster representatives.
-        lo, hi = 0, len(old) - 1
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            if old[mid] <= x:
-                lo = mid
-            else:
-                hi = mid
-        t = 0.0 if old[hi] == old[lo] else (x - old[lo]) / (old[hi] - old[lo])
+        hi = bisect.bisect_right(old, x)
+        lo = hi - 1
+        t = (x - old[lo]) / (old[hi] - old[lo])
         return new[lo] + t * (new[hi] - new[lo])
 
-    return {"map": fmap, "constraints": len(cons), "clusters": n, "old": old, "new": new}
+    return fmap
 
 
 # -- apply maps --------------------------------------------------------------------
@@ -387,138 +480,210 @@ def _map_bubble(b: AxisBubble, f, local_k) -> AxisBubble:
     )
 
 
-def _snap_dim_lengths(d: Drawing) -> int:
-    """Nudge grid lines when a dim is only a few tenths off — the AutoCAD off-by-one band.
+# -- redraw onto the stations ------------------------------------------------------
 
-    1650.6 displays as 1651 with DIMDEC 0. Residuals outside ~0.25–1.25 mm are left
-    to the least-squares solve (bigger conflicts need a compromise, not a hard pull).
-    """
-    buckets: dict[tuple[int, float], list[float]] = defaultdict(list)
-    for dim in d.linear_dims:
-        pv = parse_value(dim.text)
-        if not pv or pv[0] <= 0:
-            continue
-        value = pv[0]
-        ang = dim.angle % 180
-        if angle_diff(ang, 0.0) <= _AXIS_TOL:
-            axis = 0
-        elif angle_diff(ang, 90.0) <= _AXIS_TOL:
-            axis = 1
-        else:
-            continue
-        a, b = dim.p1[axis], dim.p2[axis]
-        span = abs(b - a)
-        if span < 1e-6:
-            continue
-        err = value - span
-        if not (0.25 <= abs(err) <= 1.25):
-            continue
-        far = round(max(a, b), 3)
-        buckets[(axis, far)].append(err)
-    total = 0
-    for axis in (0, 1):
-        moves = {line: median(errs) for (ax, line), errs in buckets.items() if ax == axis}
-        if moves:
-            _shift_axis_many(d, axis, moves, tol=0.85)
-            total += len(moves)
-    return total
+def _place_dims(d: Drawing, info: dict, axis: int) -> None:
+    """Put the ends of every accepted dimension exactly on its solved stations."""
+    new = info["new"]
+    for c in info["kept"]:
+        dim = d.linear_dims[c.dim]
+        lo, hi = new[c.i], new[c.j]
+        swap = dim.p1[axis] > dim.p2[axis]
+        a, b = (hi, lo) if swap else (lo, hi)
+        old_a = dim.p1[axis]
+        dim.p1 = _with(dim.p1, axis, a)
+        dim.p2 = _with(dim.p2, axis, b)
+        if abs(dim.base[axis] - old_a) <= info["tol"]:
+            dim.base = _with(dim.base, axis, a)
 
 
-def _shift_axis_many(d: Drawing, axis: int, moves: dict[float, float], tol: float) -> None:
-    """Apply several line shifts on one axis in a single pass."""
-    lines = sorted(moves)
+def _with(p, axis: int, v: float):
+    return (v, p[1]) if axis == 0 else (p[0], v)
 
-    def delta_for(v: float) -> float:
-        # Nearest grid line within tol; lines are few dozen at most.
-        best = None
-        best_d = tol + 1.0
-        for line in lines:
-            dv = abs(v - line)
-            if dv <= tol and dv < best_d:
-                best, best_d = line, dv
-        return moves[best] if best is not None else 0.0
 
-    def shift_pt(p):
-        dlt = delta_for(p[axis])
-        if dlt == 0.0:
-            return p
-        return (p[0] + dlt, p[1]) if axis == 0 else (p[0], p[1] + dlt)
+def _snapper(targets: list[float], tol: float):
+    """Coordinate -> nearest target within tol, else unchanged."""
+    arr = sorted(targets)
+    if not arr:
+        return None
 
-    def shift_seg(g):
+    def f(v: float) -> float:
+        k = bisect.bisect_left(arr, v)
+        best, best_d = v, tol
+        for kk in (k - 1, k):
+            if 0 <= kk < len(arr):
+                dd = abs(arr[kk] - v)
+                if dd <= best_d:
+                    best, best_d = arr[kk], dd
+        return best
+
+    return f
+
+
+def _transform_points(d: Drawing, fx, fy) -> None:
+    """Apply per-axis coordinate functions to geometry vertices (not to text)."""
+    if fx is None and fy is None:
+        return
+    fx = fx or (lambda v: v)
+    fy = fy or (lambda v: v)
+
+    def p(q):
+        return (fx(q[0]), fy(q[1]))
+
+    def seg(g):
         if isinstance(g, Line):
-            return Line(shift_pt(g.a), shift_pt(g.b))
+            return Line(p(g.a), p(g.b))
         if isinstance(g, Arc):
-            return Arc(shift_pt(g.center), g.radius, g.start_angle, g.sweep)
+            return Arc(p(g.center), g.radius, g.start_angle, g.sweep)
         if isinstance(g, Bezier):
-            return Bezier(shift_pt(g.p0), shift_pt(g.p1), shift_pt(g.p2), shift_pt(g.p3))
+            return Bezier(p(g.p0), p(g.p1), p(g.p2), p(g.p3))
         return g
 
     for s in d.shapes:
-        s.segs = [shift_seg(g) for g in s.segs]
-    for t in d.texts:
-        t.insert = shift_pt(t.insert)
-        x0, y0, x1, y1 = t.bbox
-        corners = [shift_pt((x0, y0)), shift_pt((x1, y0)), shift_pt((x0, y1)), shift_pt((x1, y1))]
-        t.bbox = (min(p[0] for p in corners), min(p[1] for p in corners),
-                  max(p[0] for p in corners), max(p[1] for p in corners))
-    for dim in d.linear_dims:
-        dim.p1 = shift_pt(dim.p1)
-        dim.p2 = shift_pt(dim.p2)
-        dim.base = shift_pt(dim.base)
-        dim.text_pos = shift_pt(dim.text_pos)
-        dim.measured = dist(dim.p1, dim.p2)
-    for dim in d.radial_dims:
-        dim.center = shift_pt(dim.center)
-        dim.point = shift_pt(dim.point)
-        dim.text_pos = shift_pt(dim.text_pos)
-        dim.radius = dist(dim.center, dim.point)
-    for ld in d.leaders:
-        ld.vertices = [shift_pt(v) for v in ld.vertices]
-        ld.text_pos = shift_pt(ld.text_pos)
+        s.segs = [seg(g) for g in s.segs]
     for h in d.hatches:
-        h.loops = [[shift_seg(g) for g in loop] for loop in h.loops]
-        for fam in h.families:
-            fam.base = shift_pt(fam.base)
-    for ins in d.inserts:
-        ins.insert = shift_pt(ins.insert)
-    for b in d.axis_bubbles:
-        b.center = shift_pt(b.center)
-
-
-def _enforce_dim_endpoints(d: Drawing) -> int:
-    """Set each orthogonal dim's own endpoints to the exact labeled length.
-
-    Shared walls may still carry a sub-millimetre compromise from least squares; the
-    dimension entity itself then reads the label, so AutoCAD shows 1650 not 1651.
-    """
-    n = 0
+        h.loops = [[seg(g) for g in loop] for loop in h.loops]
     for dim in d.linear_dims:
-        pv = parse_value(dim.text)
-        if not pv or pv[0] <= 0:
+        dim.p1, dim.p2, dim.base = p(dim.p1), p(dim.p2), p(dim.base)
+    for ld in d.leaders:
+        ld.vertices = [p(v) for v in ld.vertices]
+    for ins in d.inserts:
+        ins.insert = p(ins.insert)
+    for b in d.axis_bubbles:
+        b.center = p(b.center)
+
+
+def _snap_walls(d: Drawing, axis: int, anchors: list[float]) -> dict:
+    """Snap parallel faces of the same line style onto whole-10 mm thicknesses.
+
+    axis 0 handles faces of constant X (thickness measured in X). A face on a
+    dimensioned station stays put; the other face moves. Faces that would be pulled
+    to two different places stay where they are.
+    """
+    faces: dict[tuple, list[tuple[float, float]]] = defaultdict(list)
+    exact: dict[tuple, float] = {}
+    for s in d.shapes:
+        if not s.stroke or s.style.dashes:
             continue
-        value = pv[0]
-        ang = dim.angle % 180
-        if angle_diff(ang, 0.0) <= _AXIS_TOL:
-            axis = 0
-        elif angle_diff(ang, 90.0) <= _AXIS_TOL:
-            axis = 1
-        else:
+        key = (s.style.layer, s.style.color, round(s.style.width, 4))
+        for g in s.segs:
+            if not isinstance(g, Line) or abs(g.a[axis] - g.b[axis]) > 0.05:
+                continue
+            lo, hi = sorted((g.a[1 - axis], g.b[1 - axis]))
+            if hi - lo >= _WALL_MIN_LEN:
+                c = (g.a[axis] + g.b[axis]) / 2
+                faces[(key, round(c, 2))].append((lo, hi))
+                exact.setdefault((key, round(c, 2)), c)
+    by_key: dict[tuple, list[tuple[float, list]]] = defaultdict(list)
+    for fk, spans in faces.items():
+        by_key[fk[0]].append((exact[fk], spans))
+    anchors = sorted(anchors)
+
+    def is_anchor(c: float) -> bool:
+        k = bisect.bisect_left(anchors, c - 0.01)
+        return k < len(anchors) and abs(anchors[k] - c) <= 0.01
+
+    proposals: dict[float, list[float]] = defaultdict(list)
+    refs: set[float] = set()
+    pairs = 0
+    for key, lst in by_key.items():
+        lst.sort(key=lambda t: t[0])
+        for n, (c1, s1) in enumerate(lst):
+            for c2, s2 in lst[n + 1:]:
+                gap = c2 - c1
+                if gap > _WALL_GAP[1]:
+                    break
+                if gap < _WALL_GAP[0] or _overlap(s1, s2) < _WALL_MIN_LEN:
+                    continue
+                pairs += 1
+                module = round(gap / _WALL_MODULE) * _WALL_MODULE
+                err = module - gap
+                if abs(err) > _WALL_TOL or abs(err) < 1e-3:
+                    break
+                a1, a2 = is_anchor(c1), is_anchor(c2)
+                if a1 and a2:
+                    break
+                if a1 or (not a2 and _length(s1) >= _length(s2)):
+                    proposals[c2].append(c1 + module)
+                    refs.add(c1)
+                else:
+                    proposals[c1].append(c2 - module)
+                    refs.add(c2)
+                break  # only the nearest overlapping face forms a wall with c1
+    moves = {}
+    for c, tgts in proposals.items():
+        if c in refs or max(tgts) - min(tgts) > 0.05:
             continue
-        a0, b0 = dim.p1[axis], dim.p2[axis]
-        span = abs(b0 - a0)
-        if span < 1e-6 or abs(value - span) < 0.01:
-            continue
-        sign = 1.0 if b0 >= a0 else -1.0
-        new_b = a0 + sign * value
-        delta = new_b - b0
-        if axis == 0:
-            dim.p2 = (new_b, dim.p2[1])
-            dim.base = (dim.base[0] + delta, dim.base[1]) if abs(dim.base[0] - b0) <= 0.85 else dim.base
-            dim.text_pos = (dim.text_pos[0] + delta / 2, dim.text_pos[1])
-        else:
-            dim.p2 = (dim.p2[0], new_b)
-            dim.base = (dim.base[0], dim.base[1] + delta) if abs(dim.base[1] - b0) <= 0.85 else dim.base
-            dim.text_pos = (dim.text_pos[0], dim.text_pos[1] + delta / 2)
-        dim.measured = value
-        n += 1
-    return n
+        moves[c] = sum(tgts) / len(tgts)
+    if moves:
+        keys = sorted(moves)
+
+        def f(v: float) -> float:
+            k = bisect.bisect_left(keys, v - 0.05)
+            if k < len(keys) and abs(keys[k] - v) <= 0.05:
+                return moves[keys[k]]
+            return v
+
+        _transform_points(d, f if axis == 0 else None, f if axis == 1 else None)
+    return {"pairs": pairs, "snapped": len(moves)}
+
+
+def _overlap(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> float:
+    return sum(max(0.0, min(h1, h2) - max(l1, l2)) for l1, h1 in a for l2, h2 in b)
+
+
+def _length(spans: list[tuple[float, float]]) -> float:
+    return sum(h - l for l, h in spans)
+
+
+# -- report ------------------------------------------------------------------------
+
+def _axis_name(d: Drawing, axis: int, coord: float, tol: float) -> str | None:
+    best = None
+    for b in d.axis_bubbles:
+        dd = abs(b.center[axis] - coord)
+        if dd <= tol and (best is None or dd < best[0]):
+            best = (dd, b.label)
+    return best[1] if best else None
+
+
+def _describe_conflicts(d: Drawing, info: dict, axis: int) -> list[dict]:
+    out = []
+    tol = 2.0 * info["tol"]
+    for c in info["flagged"]:
+        dim = d.linear_dims[c.dim]
+        a, b = sorted((dim.p1[axis], dim.p2[axis]))
+        out.append({
+            "axis": "xy"[axis],
+            "label": c.value,
+            "text": dim.text,
+            "drawn": round(b - a, 1),
+            "deviation": round(c.value - (b - a), 1),
+            "reason": c.reason,
+            "from": _axis_name(d, axis, a, tol),
+            "to": _axis_name(d, axis, b, tol),
+            "at": (round(a), round(b)),
+        })
+    return out
+
+
+def _residuals(d: Drawing, hx: dict, hy: dict) -> dict:
+    devs = []
+    compromise = []
+    for info, axis in ((hx, 0), (hy, 1)):
+        for c in info["kept"]:
+            dim = d.linear_dims[c.dim]
+            got = abs(dim.p2[axis] - dim.p1[axis])
+            devs.append(abs(c.value - got))
+            if devs[-1] >= 0.005:
+                compromise.append({"axis": "xy"[axis], "label": c.value, "drawn": round(got, 2)})
+    shift = [abs(v) for v in hx["shift"] + hy["shift"]]
+    return {
+        "dims_checked": len(devs),
+        "dims_exact": sum(1 for v in devs if v < 0.005),
+        "dim_max": round(max(devs), 3) if devs else 0.0,
+        # Labels that disagree by under a millimetre around a loop (e.g. 3 × 2167 = 6500).
+        "compromise": compromise,
+        "station_shift_max": round(max(shift), 2) if shift else 0.0,
+        "station_shift_p95": round(float(np.percentile(shift, 95)), 2) if shift else 0.0,
+    }
