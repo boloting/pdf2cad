@@ -233,6 +233,159 @@ def _value_options(text: str, expected: float | None) -> list[tuple[str, int, in
     return out
 
 
+def infer_scale(d: Drawing, consumed: set[int], max_arrow: float = 8.0) -> float | None:
+    """Drawing scale from numeric labels next to tick/arrow dimension lines.
+
+    Used after OCR: stroke-glyph dims can lock onto a wrong scale when every short
+    module misreads as the same digits; label lengths on the real overall chains
+    are a stronger vote.
+    """
+    shapes = d.shapes
+    arrows = detect_arrows(shapes, consumed, max_arrow)
+    arrow_grid: Grid[int] = Grid(2.0)
+    for i, a in enumerate(arrows):
+        arrow_grid.insert_point(a.tip, i)
+    lines = [s for s in shapes if s.id not in consumed and s.is_single_line and s.stroke]
+    ticks: list[tuple[Vec, float, float, Shape]] = []
+    tick_grid: Grid[int] = Grid(3.0)
+    for s in shapes:
+        if s.id in consumed:
+            continue
+        ax = _stroke_axis(s)
+        if ax is None:
+            continue
+        p, q = ax
+        ln = dist(p, q)
+        if 0.5 <= ln <= 6.0:
+            m = mid(p, q)
+            tick_grid.insert_point(m, len(ticks))
+            ticks.append((m, line_angle(p, q), ln, s))
+
+    def ticks_on(line: Shape, a: Vec, b: Vec) -> list[tuple[float, float]]:
+        hits = []
+        la = line_angle(a, b)
+        for i in tick_grid.query((min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])), 0.2):
+            m, ang, ln, t = ticks[i]
+            if t.id == line.id:
+                continue
+            if abs(angle_diff(ang, la) - 45) > 12:
+                continue
+            if point_line_distance(m, a, b) < 0.15:
+                p = project_param(m, a, b)
+                if -0.01 <= p <= 1.01:
+                    hits.append((p, ln))
+        hits.sort(key=lambda x: x[0])
+        merged: list[tuple[float, float]] = []
+        total = dist(a, b)
+        for p, ln in hits:
+            if merged and (p - merged[-1][0]) * total < 0.3:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], ln))
+            else:
+                merged.append((p, ln))
+        return merged
+
+    spans: list[tuple[Vec, Vec]] = []
+    for s in lines:
+        g = s.segs[0]
+        a, b = g.start(), g.end()
+        if dist(a, b) < 0.8:
+            continue
+        u = unit(sub(b, a))
+        tip_a = tip_b = None
+        for i in arrow_grid.query_point(a, TIP_TOL):
+            ar = arrows[i]
+            if dist(ar.tip, a) <= TIP_TOL and (ar.kind == "dot" or abs(cross(ar.direction, u)) < 0.1):
+                tip_a = a
+                break
+        for i in arrow_grid.query_point(b, TIP_TOL):
+            ar = arrows[i]
+            if dist(ar.tip, b) <= TIP_TOL and (ar.kind == "dot" or abs(cross(ar.direction, u)) < 0.1):
+                tip_b = b
+                break
+        if tip_a is not None and tip_b is not None:
+            spans.append((a, b))
+            continue
+        tk = ticks_on(s, a, b)
+        if len(tk) < 2:
+            continue
+        for k in range(len(tk) - 1):
+            pa = add(a, mul(sub(b, a), tk[k][0]))
+            pb = add(a, mul(sub(b, a), tk[k + 1][0]))
+            if dist(pa, pb) >= 0.8:
+                spans.append((pa, pb))
+
+    texts = {t.id: t for t in d.texts}
+    text_grid: Grid[int] = Grid(5.0)
+    for t in d.texts:
+        text_grid.insert(t.bbox, t.id)
+    ratios: list[float] = []
+    for a, b in spans:
+        ln = dist(a, b)
+        if ln < 0.8:
+            continue
+        la = line_angle(a, b)
+        box = (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+        for tid in text_grid.query(box, 12.0):
+            t = texts.get(tid)
+            if t is None:
+                continue
+            pv = parse_value(t.text)
+            if pv is None or pv[0] < 100:
+                continue
+            if angle_diff(t.rotation % 180, la) > 2.0:
+                continue
+            ctr = text_anchor(t)
+            pd = point_line_distance(ctr, a, b)
+            if pd > 1.6 * t.height + 1.0:
+                continue
+            p = project_param(ctr, a, b)
+            if p < -0.15 or p > 1.15:
+                continue
+            ratios.append(pv[0] / ln)
+    if len(ratios) < 3:
+        return None
+    # Prefer a standard scale that many label/line pairs agree with.
+    best_c, best_n = None, 0
+    for c in COMMON_SCALES:
+        n = sum(1 for r in ratios if abs(r / c - 1) <= 0.08)
+        if n > best_n:
+            best_c, best_n = c, n
+    if best_c is None or best_n < max(3, 0.4 * len(ratios)):
+        return None
+    return float(best_c)
+
+
+def prune_dims_disagreeing(d: Drawing, scale: float, tol: float = 0.12) -> int:
+    """Drop linear dims whose label/length ratio fights `scale`; clear spans if most are bad."""
+    if scale <= 0 or not d.linear_dims:
+        return 0
+    spans = getattr(d, "dim_spans", None)
+    keep: list[LinearDim] = []
+    dropped = 0
+    for dim in d.linear_dims:
+        pv = parse_value(dim.text)
+        ok = (
+            pv is not None and dim.measured > 0.5
+            and abs(pv[0] / dim.measured / scale - 1) <= tol
+        )
+        if ok:
+            keep.append(dim)
+        else:
+            dropped += 1
+    if not dropped:
+        return 0
+    if spans is not None and dropped >= max(1, 0.5 * (dropped + len(keep))):
+        # Wrong-scale glyph dims poisoned the span set; allow a full rebuild.
+        spans.clear()
+        dropped += len(keep)
+        d.linear_dims = []
+        if hasattr(d, "glyph_dims"):
+            d.glyph_dims = 0  # type: ignore[attr-defined]
+        return dropped
+    d.linear_dims = keep
+    return dropped
+
+
 def recognize(d: Drawing, consumed: set[int], used_texts: set[int], max_arrow: float = 8.0,
               scale: float | None = None, again: bool = False) -> None:
     """Rebuild dimensions.  With again=True, a later pass over texts found since (OCR): spans

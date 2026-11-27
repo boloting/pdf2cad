@@ -151,7 +151,10 @@ def _runs(key, u, nrm, line) -> list[dict]:
         return []
     steps = [b[1] - a[1] for a, b in zip(pat, pat[1:])]
     common = Counter(round(v, 1) for v in steps).most_common(1)[0][0]
-    pitch = median(v for v in steps if abs(v - common) <= 0.03 * common)
+    near = [v for v in steps if abs(v - common) <= 0.03 * max(common, 1e-6)]
+    if len(near) < 2:
+        return []
+    pitch = median(near)
     if pitch <= 1.02 * dash or sum(1 for v in steps if abs(v - pitch) <= 0.08 * pitch) < 3:
         return []
     # A second dashed line laid over this one, out of step: keep the steady dashes only.

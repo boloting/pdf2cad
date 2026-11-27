@@ -193,8 +193,19 @@ def convert_page(doc: pymupdf.Document, opts: Options) -> Result:
         if ocrtext.available():
             ocr_counts = ocrtext.recognize(d, consumed, opts.progress)
             if opts.dimensions and ocr_counts["text"]:
-                hint = (opts.scale if opts.scale and opts.scale > 0
-                        else getattr(d, "glyph_scale", None) or detect_scale(d))
+                # OCR labels on overall chains beat a wrong stroke-glyph scale (e.g. every
+                # short module misread as the same digits → 1:25 instead of 1:150).
+                label_scale = dims.infer_scale(d, consumed, opts.max_arrow_size)
+                hint = None
+                if opts.scale and opts.scale > 0:
+                    hint = float(opts.scale)
+                elif label_scale:
+                    hint = label_scale
+                    glyph = getattr(d, "glyph_scale", None)
+                    if glyph and abs(glyph / label_scale - 1) > 0.15:
+                        dims.prune_dims_disagreeing(d, label_scale)
+                else:
+                    hint = getattr(d, "glyph_scale", None) or detect_scale(d)
                 dims.recognize(d, consumed, used_texts, opts.max_arrow_size, scale=hint, again=True)
         elif opts.ocr is True:
             warnings.append("没有安装文字识别组件（rapidocr-onnxruntime），转曲文字未识别。")
